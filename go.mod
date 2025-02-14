@@ -3,8 +3,9 @@ module github.com/dsnet/udptunnel
 go 1.12
 
 require (
-	github.com/dsnet/golib/jsonfmt v0.0.0-20190531212259-571cdbcff553
-	github.com/dsnet/golib/unitconv v0.0.0-20190531212259-571cdbcff553
-	github.com/songgao/water v0.0.0-20190402020555-6ad6edefb15c
-	golang.org/x/sys v0.0.0-20190531175056-4c3a928424d2 // indirect
+	github.com/dsnet/golib/jsonfmt v1.0.0
+	github.com/dsnet/golib/unitconv v1.0.2
+	github.com/libp2p/go-reuseport v0.4.0 // indirect
+	github.com/songgao/water v0.0.0-20200317203138-2b4b6d7c09d8
+	golang.org/x/sys v0.30.0 // indirect
 )

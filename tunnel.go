@@ -100,11 +100,11 @@ func (t tunnel) run(ctx context.Context) {
 
 	// Create a new UDP socket.
 	_, port, _ := net.SplitHostPort(t.netAddr)
-	laddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort("", port))
+	laddr, err := net.ResolveUDPAddr("udp4", net.JoinHostPort("", port))
 	if err != nil {
 		t.log.Fatalf("error resolving address: %v", err)
 	}
-	sock, err := net.ListenUDP("udp", laddr)
+	sock, err := net.ListenUDP("udp4", laddr)
 	if err != nil {
 		t.log.Fatalf("error listening on socket: %v", err)
 	}
@@ -118,7 +118,6 @@ func (t tunnel) run(ctx context.Context) {
 		close(t.testReady)
 	}
 	pf := newPortFilter(t.ports)
-	pl := newPacketLogger(ctx, &wg, t.log)
 
 	// On the client, start some goroutines to accommodate for the dynamically
 	// changing environment that the client may be in.
@@ -153,7 +152,6 @@ func (t tunnel) run(ctx context.Context) {
 			}
 			ticker := time.NewTicker(t.beatInterval)
 			defer ticker.Stop()
-			var prevTxn uint64
 			for range ticker.C {
 				if isDone(ctx) { // Stop if done.
 					return
@@ -162,11 +160,6 @@ func (t tunnel) run(ctx context.Context) {
 				if raddr == nil { // Skip if no remote endpoint.
 					continue
 				}
-				txn := pl.Stats().Tx.Okay.Count
-				if prevTxn == txn { // Only send if there is no outbound traffic
-					sock.WriteToUDP(magic[:], raddr)
-				}
-				prevTxn = txn
 			}
 		}()
 	}
@@ -192,7 +185,6 @@ func (t tunnel) run(ctx context.Context) {
 				if t.testDrop != nil {
 					t.testDrop <- append([]byte(nil), p...)
 				}
-				pl.Log(p, outbound, true)
 				continue
 			}
 
@@ -204,7 +196,6 @@ func (t tunnel) run(ctx context.Context) {
 				time.Sleep(time.Second)
 				continue
 			}
-			pl.Log(p, outbound, false)
 		}
 	}()
 
@@ -247,7 +238,6 @@ func (t tunnel) run(ctx context.Context) {
 				if t.testDrop != nil {
 					t.testDrop <- append([]byte(nil), p...)
 				}
-				pl.Log(p, inbound, true)
 				continue
 			}
 
@@ -257,7 +247,6 @@ func (t tunnel) run(ctx context.Context) {
 				}
 				t.log.Fatalf("tun write error: %v", err)
 			}
-			pl.Log(p, inbound, false)
 		}
 	}()
 

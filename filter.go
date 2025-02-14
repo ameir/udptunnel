@@ -108,37 +108,5 @@ func (sf *portFilter) Filter(b []byte, d direction) (drop bool) {
 	if ip.Protocol() != tcp && ip.Protocol() != udp {
 		return ip.Protocol() != icmp // Always allow ping
 	}
-	src, dst := transportPacket(ip.Body()).Ports()
-	if sf.ports[src] && sf.ports[dst] {
-		return false
-	}
-	switch d {
-	case outbound:
-		if sf.ports[src] && dst > 0 {
-			// Check whether the destination port is somewhere we have received
-			// an inbound packet from.
-			ts := atomic.LoadUint64(&sf.inMap[dst])
-			return timeNow()-ts >= expireTimeout
-		}
-		if sf.ports[dst] && src > 0 {
-			// Allowed outbound packet, remember the source port so that inbound
-			// traffic is allowed to hit that destination port.
-			atomic.StoreUint64(&sf.outMap[src], timeNow())
-			return false
-		}
-	case inbound:
-		if sf.ports[src] && dst > 0 {
-			// Check whether the destination port is somewhere we have sent
-			// an outbound packet to.
-			ts := atomic.LoadUint64(&sf.outMap[dst])
-			return timeNow()-ts >= expireTimeout
-		}
-		if sf.ports[dst] && src > 0 {
-			// Allowed inbound packet, remember the source port so that outbound
-			// traffic is allowed to hit that destination port.
-			atomic.StoreUint64(&sf.inMap[src], timeNow())
-			return false
-		}
-	}
-	return true
+	return false
 }

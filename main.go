@@ -4,13 +4,13 @@
 
 // udptunnel is a daemon that sets up a point-to-point virtual private network
 // between two hosts:
-//	* A client host that may be behind an obtrusive NAT that frequently drops
-//	TCP connections, but happens to pass UDP traffic reliably.
-//	* A server host that is internet-accessible.
+//   - A client host that may be behind an obtrusive NAT that frequently drops
+//     TCP connections, but happens to pass UDP traffic reliably.
+//   - A server host that is internet-accessible.
 //
 // This only supports Linux.
 //
-// Example Setup
+// # Example Setup
 //
 // The udptunnel is setup by running it on two different hosts, one in a server
 // configuration, and the other in client configuration. The difference between
@@ -20,13 +20,16 @@
 // will use the host to dial the server.
 //
 // Example server config:
+//
 //	{"TunnelAddress": "10.0.0.1", "NetworkAddress": ":8000", "AllowedPorts": [22]}
+//
 // Example client config:
+//
 //	{"TunnelAddress": "10.0.0.2", "NetworkAddress": "example.com:8000", "AllowedPorts": [22]}
 //
 // See the TunnelConfig struct for more details.
 //
-// Security Considerations
+// # Security Considerations
 //
 // TUN traffic is sent ad-verbatim between the two endpoints via unencrypted
 // UDP traffic. The intended use case is to run a secure protocol (like SSH;
@@ -44,9 +47,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"net"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"path"
@@ -133,13 +136,13 @@ func loadConfig(conf string) (tunn tunnel, logger *log.Logger, closer func() err
 	logger = log.New(io.MultiWriter(os.Stderr, &logBuf), "", log.Ldate|log.Ltime|log.Lshortfile)
 
 	var hash string
-	if b, _ := ioutil.ReadFile(os.Args[0]); len(b) > 0 {
+	if b, _ := os.ReadFile(os.Args[0]); len(b) > 0 {
 		hash = fmt.Sprintf("%x", sha256.Sum256(b))
 	}
 
 	// Load configuration file.
 	var config TunnelConfig
-	c, err := ioutil.ReadFile(conf)
+	c, err := os.ReadFile(conf)
 	if err != nil {
 		logger.Fatalf("unable to read config: %v", err)
 	}
@@ -224,6 +227,8 @@ func main() {
 	tunn, logger, closer := loadConfig(os.Args[1])
 	defer closer()
 
+	runtime.GOMAXPROCS(20 * runtime.NumCPU())
+
 	// Setup signal handler to initiate shutdown.
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
@@ -239,6 +244,11 @@ func main() {
 	} else {
 		logger.Printf("%s starting in client mode", path.Base(os.Args[0]))
 	}
+
+	// go func() {
+	// 	log.Println("booting on localhost:8666]")
+	// 	log.Fatal(http.ListenAndServe(":8666", nil))
+	// }()
 	defer logger.Printf("%s shutdown", path.Base(os.Args[0]))
 	tunn.run(ctx)
 }

@@ -51,7 +51,7 @@ func newPacketLogger(ctx context.Context, wg *sync.WaitGroup, logger logger) *pa
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		pl.monitor(ctx)
+		//pl.monitor(ctx)
 	}()
 	return pl
 }
