@@ -64,7 +64,7 @@ func TestFilter(t *testing.T) {
 		{5, inbound, dh("45100028ae1b4000400678a20a0000010a0000021770a0cc00000000948245b65014000009590000"), true},
 	}
 
-	pf := newPortFilter([]uint16{6000})
+	pf := newPortFilter()
 	for i, tt := range tests {
 		now += tt.addTime
 		dropped := pf.Filter(tt.packet, tt.direction)

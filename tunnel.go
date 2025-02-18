@@ -39,7 +39,6 @@ type tunnel struct {
 	tunLocalAddr  string
 	tunRemoteAddr string
 	netAddr       string
-	ports         []uint16
 	magic         string
 	beatInterval  time.Duration
 
@@ -117,7 +116,7 @@ func (t tunnel) run(ctx context.Context) {
 	if t.testReady != nil {
 		close(t.testReady)
 	}
-	pf := newPortFilter(t.ports)
+	pf := newPortFilter()
 
 	// On the client, start some goroutines to accommodate for the dynamically
 	// changing environment that the client may be in.

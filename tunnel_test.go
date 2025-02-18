@@ -69,7 +69,6 @@ func TestTunnel(t *testing.T) {
 			tunLocalAddr:  "10.0.10.1",
 			tunRemoteAddr: "10.0.10.2",
 			netAddr:       fmt.Sprintf(":%d", addrLocal.Port),
-			ports:         []uint16{uint16(addrSpecified.Port)},
 			log:           testLogger{t},
 			testReady:     chanReady,
 			testDrop:      chanDrop,

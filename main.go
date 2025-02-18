@@ -98,14 +98,6 @@ type TunnelConfig struct {
 	// specified host to communicate with the server (e.g., "example.com:8000").
 	NetworkAddress string
 
-	// AllowedPorts is a list of allowed UDP and TCP ports.
-	// Since udptunnel sends traffic as unencrypted messages,
-	// only protocols that provide application-layer security (like SSH)
-	// should be used.
-	//
-	// The set of allowed ports must match on both the client and server.
-	AllowedPorts []uint16
-
 	// HeartbeatInterval is the amount of time in seconds without any
 	// outbound traffic to wait before the tunnel client will send a heartbeat
 	// message to the server. In the event that the client's address changed,
@@ -201,16 +193,13 @@ func loadConfig(conf string) (tunn tunnel, logger *log.Logger, closer func() err
 	if net.ParseIP(config.TunnelAddress).To4() == nil {
 		logger.Fatalf("private tunnel address must be valid IPv4 address")
 	}
-	if len(config.AllowedPorts) == 0 {
-		logger.Fatalf("no allowed ports specified")
-	}
+
 	tunn = tunnel{
 		server:        serverMode,
 		tunDevName:    config.TunnelDevice,
 		tunLocalAddr:  config.TunnelAddress,
 		tunRemoteAddr: config.TunnelPeerAddress,
 		netAddr:       config.NetworkAddress,
-		ports:         config.AllowedPorts,
 		magic:         config.PacketMagic,
 		beatInterval:  time.Second * time.Duration(*config.HeartbeatInterval),
 		log:           logger,

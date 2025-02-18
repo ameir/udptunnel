@@ -87,16 +87,10 @@ type portFilter struct {
 	// Last time a packet was received from some ephemeral source port.
 	inMap [1 << 16]uint64 // [port]time
 
-	// Set of allowed inbound ports.
-	ports map[uint16]bool
 }
 
-func newPortFilter(ports []uint16) *portFilter {
-	sf := &portFilter{ports: make(map[uint16]bool)}
-	for _, p := range ports {
-		sf.ports[p] = true
-	}
-	return sf
+func newPortFilter() *portFilter {
+	return &portFilter{}
 }
 
 func (sf *portFilter) Filter(b []byte, d direction) (drop bool) {
