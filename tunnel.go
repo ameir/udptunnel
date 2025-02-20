@@ -80,17 +80,17 @@ func (t tunnel) run(ctx context.Context) {
 	// Setup IP properties.
 	switch runtime.GOOS {
 	case "linux":
-		if err := exec.Command("/sbin/ip", "link", "set", "dev", iface.Name(), "mtu", "1300").Run(); err != nil {
+		if err := exec.Command("ip", "link", "set", "dev", iface.Name(), "mtu", "1300").Run(); err != nil {
 			t.log.Fatalf("ip link error: %v", err)
 		}
-		if err := exec.Command("/sbin/ip", "addr", "add", t.tunLocalAddr+"/24", "dev", iface.Name()).Run(); err != nil {
+		if err := exec.Command("ip", "addr", "add", t.tunLocalAddr+"/24", "dev", iface.Name()).Run(); err != nil {
 			t.log.Fatalf("ip addr error: %v", err)
 		}
-		if err := exec.Command("/sbin/ip", "link", "set", "dev", iface.Name(), "up").Run(); err != nil {
+		if err := exec.Command("ip", "link", "set", "dev", iface.Name(), "up").Run(); err != nil {
 			t.log.Fatalf("ip link error: %v", err)
 		}
 	case "darwin":
-		if err := exec.Command("/sbin/ifconfig", iface.Name(), "mtu", "1300", t.tunLocalAddr, t.tunRemoteAddr, "up").Run(); err != nil {
+		if err := exec.Command("ifconfig", iface.Name(), "mtu", "1300", t.tunLocalAddr, t.tunRemoteAddr, "up").Run(); err != nil {
 			t.log.Fatalf("ifconfig error: %v", err)
 		}
 	default:
@@ -124,7 +124,7 @@ func (t tunnel) run(ctx context.Context) {
 	if !t.server {
 		// Since the remote address could change due to updates to DNS,
 		// periodically check DNS for a new address.
-		raddr, err := net.ResolveUDPAddr("udp", t.netAddr)
+		raddr, err := net.ResolveUDPAddr("udp4", t.netAddr)
 		if err != nil {
 			t.log.Fatalf("error resolving address: %v", err)
 		}
@@ -133,7 +133,7 @@ func (t tunnel) run(ctx context.Context) {
 			ticker := time.NewTicker(30 * time.Second)
 			defer ticker.Stop()
 			for range ticker.C {
-				raddr, _ := net.ResolveUDPAddr("udp", t.netAddr)
+				raddr, _ := net.ResolveUDPAddr("udp4", t.netAddr)
 				if isDone(ctx) {
 					return
 				}
