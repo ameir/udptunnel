@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/libp2p/go-reuseport"
 	"github.com/songgao/water"
 )
 
@@ -103,11 +104,13 @@ func (t tunnel) run(ctx context.Context) {
 	if err != nil {
 		t.log.Fatalf("error resolving address: %v", err)
 	}
-	sock, err := net.ListenUDP("udp4", laddr)
+	//sock, err := net.ListenUDP("udp4", laddr)
+	lp, err := reuseport.ListenPacket("udp4", laddr.String())
 	if err != nil {
 		t.log.Fatalf("error listening on socket: %v", err)
 	}
-	defer sock.Close()
+	defer lp.Close()
+	sock := lp.(*net.UDPConn)
 
 	// TODO(dsnet): We should drop root privileges at this point since the
 	// TUN device and UDP socket have been set up. However, there is no good
