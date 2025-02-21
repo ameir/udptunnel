@@ -10,7 +10,6 @@ import (
 	"crypto/md5"
 	"net"
 	"os/exec"
-	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
@@ -19,7 +18,7 @@ import (
 	"time"
 
 	"github.com/libp2p/go-reuseport"
-	"github.com/songgao/water"
+	tun "github.com/sina-ghaderi/tunnel"
 )
 
 type direction byte
@@ -65,12 +64,8 @@ func (t tunnel) run(ctx context.Context) {
 	defer wg.Wait()
 
 	// Create a new tunnel device (requires root privileges).
-	conf := water.Config{DeviceType: water.TUN}
-	if runtime.GOOS == "linux" && t.tunDevName != "" {
-		// Use reflect to avoid separate build file for linux-only.
-		reflect.ValueOf(&conf).Elem().FieldByName("Name").SetString(t.tunDevName)
-	}
-	iface, err := water.New(conf)
+
+	iface, err := tun.New(tun.Config{})
 	if err != nil {
 		t.log.Fatalf("error creating tun device: %v", err)
 	}
@@ -243,11 +238,20 @@ func (t tunnel) run(ctx context.Context) {
 				continue
 			}
 
-			if _, err := iface.Write(p); err != nil {
-				if isDone(ctx) {
-					return
+			var nw int
+			for {
+				payload := p[nw:]
+				nw, err = iface.Write(payload)
+				if err != nil {
+					if isDone(ctx) {
+						return
+					}
+					t.log.Fatalf("tun write error: %v", err)
 				}
-				t.log.Fatalf("tun write error: %v", err)
+
+				if nw == 0 {
+					break
+				}
 			}
 		}
 	}()
