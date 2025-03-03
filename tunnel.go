@@ -44,10 +44,6 @@ type tunnel struct {
 	// remoteAddr is the address of the remote endpoint and may be
 	// arbitrarily updated.
 	remoteAddr atomic.Value
-
-	// testReady and testDrop are used by tests to detect specific events.
-	testReady chan<- struct{} // Closed when tunnel is ready
-	testDrop  chan<- []byte   // Copy of every dropped packet
 }
 
 // run starts the VPN tunnel over UDP using the provided config and logger.
