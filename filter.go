@@ -93,7 +93,7 @@ func newPortFilter() *portFilter {
 	return &portFilter{}
 }
 
-func (sf *portFilter) Filter(b []byte, d direction) (drop bool) {
+func (sf *portFilter) Filter(b []byte) (drop bool) {
 	// This logic assumes malformed IP packets are rejected by the Linux kernel.
 	ip := ipPacket(b)
 	if ip.Version() != 4 {

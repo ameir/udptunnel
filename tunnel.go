@@ -5,7 +5,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/md5"
 	"net"
@@ -178,10 +177,7 @@ func (t tunnel) run(ctx context.Context) {
 			p := b[len(magic):n]
 
 			raddr := t.loadRemoteAddr()
-			if pf.Filter(p, outbound) || raddr == nil {
-				if t.testDrop != nil {
-					t.testDrop <- append([]byte(nil), p...)
-				}
+			if pf.Filter(p) || raddr == nil {
 				continue
 			}
 
@@ -201,6 +197,7 @@ func (t tunnel) run(ctx context.Context) {
 	go func() {
 		defer wg.Done()
 		b := make([]byte, 1<<16)
+		var unwritten []byte
 		for {
 			n, raddr, err := sock.ReadFromUDP(b)
 			if err != nil {
@@ -211,13 +208,7 @@ func (t tunnel) run(ctx context.Context) {
 				time.Sleep(time.Second)
 				continue
 			}
-			if !bytes.HasPrefix(b[:n], magic[:]) {
-				if t.testDrop != nil {
-					t.testDrop <- append([]byte(nil), b[:n]...)
-				}
-				t.log.Printf("invalid packet from remote address: %v", raddr)
-				continue
-			}
+
 			p := b[len(magic):n]
 
 			// We assume a matching magic prefix is sufficient to validate
@@ -231,28 +222,24 @@ func (t tunnel) run(ctx context.Context) {
 				continue // Assume empty packets are a form of pinging
 			}
 
-			if pf.Filter(p, inbound) {
-				if t.testDrop != nil {
-					t.testDrop <- append([]byte(nil), p...)
-				}
+			if pf.Filter(p) {
 				continue
 			}
 
 			var nw int
-			for {
-				payload := p[nw:]
-				nw, err = iface.Write(payload)
-				if err != nil {
-					if isDone(ctx) {
-						return
-					}
-					t.log.Fatalf("tun write error: %v", err)
+			nw, err = iface.Write(append(unwritten, p...))
+			if err != nil {
+				if isDone(ctx) {
+					return
 				}
-
-				if nw == 0 {
-					break
-				}
+				t.log.Fatalf("tun write error: %v", err)
 			}
+
+			if nw > 0 {
+				unwritten = p[nw:]
+				break
+			}
+
 		}
 	}()
 
