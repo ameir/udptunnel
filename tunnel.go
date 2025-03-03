@@ -66,7 +66,7 @@ func (t tunnel) run(ctx context.Context) {
 	// Setup IP properties.
 	switch runtime.GOOS {
 	case "linux":
-		if err := exec.Command("ip", "link", "set", "dev", iface.Name(), "mtu", "1400").Run(); err != nil {
+		if err := exec.Command("ip", "link", "set", "dev", iface.Name(), "mtu", "1420").Run(); err != nil {
 			t.log.Fatalf("ip link error: %v", err)
 		}
 		if err := exec.Command("ip", "addr", "add", t.tunLocalAddr+"/24", "dev", iface.Name()).Run(); err != nil {
