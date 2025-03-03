@@ -182,7 +182,7 @@ func (t tunnel) run(ctx context.Context) {
 		b := make([]byte, 1<<16)
 		var unwritten []byte
 		for {
-			n, raddr, err := sock.ReadFromUDP(b)
+			nr, raddr, err := sock.ReadFromUDP(b)
 			if err != nil {
 				if isDone(ctx) {
 					return
@@ -200,21 +200,25 @@ func (t tunnel) run(ctx context.Context) {
 				t.updateRemoteAddr(raddr)
 			}
 
-			if n == 0 {
+			if nr == 0 {
 				continue // Assume empty packets are a form of pinging
 			}
 
-			x := append(unwritten, b[:n]...)
+			x := append(unwritten, b[:nr]...)
 			nw, err := iface.Write(x)
 			if err != nil {
 				if isDone(ctx) {
 					return
 				}
-				t.log.Fatalf("tun write error: %v", err)
+				t.log.Printf("tun write error: %v", err)
 			}
 
-			if nw > 0 {
-				unwritten = x[nw:]
+			if nr > nw {
+				offset := nr - nw
+				t.log.Printf("need to write %d more bytes", offset)
+				unwritten = x[offset:]
+			} else {
+				unwritten = nil
 			}
 
 		}
