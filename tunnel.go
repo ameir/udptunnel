@@ -9,8 +9,6 @@ import (
 	"net"
 	"os/exec"
 	"runtime"
-	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -64,7 +62,6 @@ func (t tunnel) run(ctx context.Context) {
 	}
 	t.log.Printf("created tun device: %v", iface.Name())
 	defer iface.Close()
-	defer pingIface(t.tunLocalAddr)
 
 	// Setup IP properties.
 	switch runtime.GOOS {
@@ -236,25 +233,6 @@ func (t *tunnel) updateRemoteAddr(addr *net.UDPAddr) {
 		t.remoteAddr.Store(addr)
 		t.log.Printf("switching remote address: %v", addr)
 	}
-}
-
-// pingIface sends a broadcast ping to the IP range of the TUN device
-// until the TUN device has shutdown.
-func pingIface(addr string) {
-	// HACK(dsnet): For reasons I do not understand, closing the TUN device
-	// does not cause a pending Read operation to become unblocked and return
-	// with some EOF error. As a workaround, we broadcast on the IP range
-	// of the TUN device, forcing the Read to unblock with at least one packet.
-	// The subsequent call to Read will properly report that it is closed.
-	//
-	// See https://github.com/songgao/water/issues/22
-	go func() {
-		addr = strings.TrimRight(addr, "0123456798")
-		for i := 0; i < 256; i++ {
-			cmd := exec.Command("ping", "-c", "1", addr+strconv.Itoa(i))
-			cmd.Start()
-		}
-	}()
 }
 
 func isDone(ctx context.Context) bool {
