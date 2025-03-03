@@ -56,7 +56,7 @@ func (t tunnel) run(ctx context.Context) {
 
 	// Create a new tunnel device (requires root privileges).
 
-	iface, err := tun.New(tun.Config{})
+	iface, err := tun.New(tun.Config{Name: "ut0", DisableGsoGro: true})
 	if err != nil {
 		t.log.Fatalf("error creating tun device: %v", err)
 	}
