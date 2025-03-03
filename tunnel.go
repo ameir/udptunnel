@@ -6,7 +6,6 @@ package main
 
 import (
 	"context"
-	"crypto/md5"
 	"net"
 	"os/exec"
 	"runtime"
@@ -38,7 +37,6 @@ type tunnel struct {
 	tunLocalAddr  string
 	tunRemoteAddr string
 	netAddr       string
-	magic         string
 	beatInterval  time.Duration
 
 	log logger
@@ -117,7 +115,6 @@ func (t tunnel) run(ctx context.Context) {
 
 	// On the client, start some goroutines to accommodate for the dynamically
 	// changing environment that the client may be in.
-	magic := md5.Sum([]byte(t.magic))
 	if !t.server {
 		// Since the remote address could change due to updates to DNS,
 		// periodically check DNS for a new address.
@@ -166,18 +163,16 @@ func (t tunnel) run(ctx context.Context) {
 		defer wg.Done()
 		b := make([]byte, 1<<16)
 		for {
-			n, err := iface.Read(b[len(magic):])
+			n, err := iface.Read(b)
 			if err != nil {
 				if isDone(ctx) {
 					return
 				}
 				t.log.Fatalf("tun read error: %v", err)
 			}
-			n += copy(b, magic[:])
-			p := b[len(magic):n]
 
 			raddr := t.loadRemoteAddr()
-			if pf.Filter(p) || raddr == nil {
+			if raddr == nil {
 				continue
 			}
 
@@ -209,8 +204,6 @@ func (t tunnel) run(ctx context.Context) {
 				continue
 			}
 
-			p := b[len(magic):n]
-
 			// We assume a matching magic prefix is sufficient to validate
 			// that the new IP is really the remote endpoint.
 			// We assume that any adversary capable of performing a replay
@@ -218,16 +211,13 @@ func (t tunnel) run(ctx context.Context) {
 			if t.server {
 				t.updateRemoteAddr(raddr)
 			}
-			if len(p) == 0 {
+
+			if n == 0 {
 				continue // Assume empty packets are a form of pinging
 			}
 
-			if pf.Filter(p) {
-				continue
-			}
-
-			var nw int
-			nw, err = iface.Write(append(unwritten, p...))
+			x := append(unwritten, b[:n]...)
+			nw, err := iface.Write(x)
 			if err != nil {
 				if isDone(ctx) {
 					return
@@ -236,8 +226,7 @@ func (t tunnel) run(ctx context.Context) {
 			}
 
 			if nw > 0 {
-				unwritten = p[nw:]
-				break
+				unwritten = x[nw:]
 			}
 
 		}
