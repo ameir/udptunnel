@@ -66,7 +66,7 @@ func (t tunnel) run(ctx context.Context) {
 	// Setup IP properties.
 	switch runtime.GOOS {
 	case "linux":
-		if err := exec.Command("ip", "link", "set", "dev", iface.Name(), "mtu", "1300").Run(); err != nil {
+		if err := exec.Command("ip", "link", "set", "dev", iface.Name(), "mtu", "1400").Run(); err != nil {
 			t.log.Fatalf("ip link error: %v", err)
 		}
 		if err := exec.Command("ip", "addr", "add", t.tunLocalAddr+"/24", "dev", iface.Name()).Run(); err != nil {
@@ -100,6 +100,7 @@ func (t tunnel) run(ctx context.Context) {
 	// TODO(dsnet): We should drop root privileges at this point since the
 	// TUN device and UDP socket have been set up. However, there is no good
 	// support for doing so currently: https://golang.org/issue/1435
+	pf := newPortFilter()
 
 	// On the client, start some goroutines to accommodate for the dynamically
 	// changing environment that the client may be in.
@@ -150,6 +151,7 @@ func (t tunnel) run(ctx context.Context) {
 	go func() {
 		defer wg.Done()
 		b := make([]byte, 1<<16)
+		//var unwritten []byte
 		for {
 			n, err := iface.Read(b)
 			if err != nil {
@@ -160,18 +162,25 @@ func (t tunnel) run(ctx context.Context) {
 			}
 
 			raddr := t.loadRemoteAddr()
-			if raddr == nil {
+			if pf.Filter(b[:n]) || raddr == nil {
 				continue
 			}
 
-			if _, err := sock.WriteToUDP(b[:n], raddr); err != nil {
+			n2, err := sock.WriteToUDP(b[:n], raddr)
+			if err != nil {
 				if isDone(ctx) {
 					return
 				}
-				t.log.Printf("net write error: %v", err)
+				t.log.Printf("net write error: %v\n", err)
+
 				time.Sleep(time.Second)
 				continue
 			}
+			if n != n2 {
+				t.log.Printf("payload size: %d, written size: %d\n\n", n, n2)
+
+			}
+
 		}
 	}()
 
@@ -205,6 +214,11 @@ func (t tunnel) run(ctx context.Context) {
 			}
 
 			x := append(unwritten, b[:nr]...)
+
+			if pf.Filter(x) {
+				continue
+			}
+
 			nw, err := iface.Write(x)
 			if err != nil {
 				if isDone(ctx) {
