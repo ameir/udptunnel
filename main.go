@@ -200,7 +200,6 @@ func loadConfig(conf string) (tunn tunnel, logger *log.Logger, closer func() err
 		tunLocalAddr:  config.TunnelAddress,
 		tunRemoteAddr: config.TunnelPeerAddress,
 		netAddr:       config.NetworkAddress,
-		magic:         config.PacketMagic,
 		beatInterval:  time.Second * time.Duration(*config.HeartbeatInterval),
 		log:           logger,
 	}
