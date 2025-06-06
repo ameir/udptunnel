@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE.md file.
 
+
 package main
 
 import (
@@ -17,12 +18,6 @@ import (
 	tun "github.com/sina-ghaderi/tunnel"
 )
 
-type direction byte
-
-const (
-	outbound direction = 'T' // Transmit
-	inbound  direction = 'R' // Receive
-)
 
 type logger interface {
 	Fatalf(string, ...interface{})
@@ -39,10 +34,24 @@ type tunnel struct {
 
 	log logger
 
-	// remoteAddr is the address of the remote endpoint and may be
-	// arbitrarily updated.
-	remoteAddr atomic.Value
+	// For client mode: the resolved UDP address of the server.
+	serverUDPAddr atomic.Value // Stores *net.UDPAddr of the server
+
+	// For server mode:
+	activeClients    *sync.Map // Key: client public UDP Addr (string). Value: *clientSession
+	tunnelIPtoClient *sync.Map // Key: client tunnel IP (string). Value: *net.UDPAddr (client public UDP Addr)
 }
+
+type clientSession struct {
+	publicAddr *net.UDPAddr
+	tunnelIP   net.IP // Client's private/tunnel IP, learned from its first data packet
+	lastActive time.Time
+}
+
+// serverClientStaleTimeout defines how long before an inactive client session is removed by the server.
+const serverClientStaleTimeout = 90 * time.Second
+
+// ipPacket is an IP packet. The slice is the packet data.
 
 // run starts the VPN tunnel over UDP using the provided config and logger.
 // When the context is canceled, the function is guaranteed to block until
@@ -54,9 +63,15 @@ func (t tunnel) run(ctx context.Context) {
 	var wg sync.WaitGroup
 	defer wg.Wait()
 
-	// Create a new tunnel device (requires root privileges).
+	if t.server {
+		t.activeClients = &sync.Map{}
+		t.tunnelIPtoClient = &sync.Map{}
+		go t.cleanupStaleClients(ctx, serverClientStaleTimeout)
+	}
 
-	iface, err := tun.New(tun.Config{Name: "ut0", DisableGsoGro: true})
+	// Create a new tunnel device (requires root privileges).
+	tunCfg := tun.Config{DisableGsoGro: true, Name: t.tunDevName}
+	iface, err := tun.New(tunCfg)
 	if err != nil {
 		t.log.Fatalf("error creating tun device: %v", err)
 	}
@@ -111,16 +126,16 @@ func (t tunnel) run(ctx context.Context) {
 		if err != nil {
 			t.log.Fatalf("error resolving address: %v", err)
 		}
-		t.updateRemoteAddr(raddr)
+		t.updateServerUDPAddr(raddr)
 		go func() {
 			ticker := time.NewTicker(30 * time.Second)
 			defer ticker.Stop()
 			for range ticker.C {
 				raddr, _ := net.ResolveUDPAddr("udp4", t.netAddr)
-				if isDone(ctx) {
+				if isDone(ctx) || raddr == nil {
 					return
 				}
-				t.updateRemoteAddr(raddr)
+				t.updateServerUDPAddr(raddr)
 			}
 		}()
 
@@ -138,9 +153,14 @@ func (t tunnel) run(ctx context.Context) {
 				if isDone(ctx) { // Stop if done.
 					return
 				}
-				raddr := t.loadRemoteAddr()
+				raddr := t.loadServerUDPAddr()
 				if raddr == nil { // Skip if no remote endpoint.
 					continue
+				}
+				// Send empty UDP packet as heartbeat
+				_, err := sock.WriteToUDP([]byte{}, raddr)
+				if err != nil && !isDone(ctx) {
+					t.log.Printf("client heartbeat send error: %v", err)
 				}
 			}
 		}()
@@ -151,36 +171,76 @@ func (t tunnel) run(ctx context.Context) {
 	go func() {
 		defer wg.Done()
 		b := make([]byte, 1<<16)
-		//var unwritten []byte
 		for {
 			n, err := iface.Read(b)
 			if err != nil {
 				if isDone(ctx) {
 					return
 				}
-				t.log.Fatalf("tun read error: %v", err)
-			}
-
-			raddr := t.loadRemoteAddr()
-			if pf.Filter(b[:n]) || raddr == nil {
+				// Log non-fatal TUN read errors and attempt to continue.
+				// Certain errors might indicate the TUN device is closed, warranting goroutine exit.
+				t.log.Printf("tun read error: %v; attempting to continue", err)
+				if err.Error() == "read /dev/net/tun: file already closed" || err.Error() == "read /dev/utun: file already closed" { // Example check
+					t.log.Printf("TUN device appears closed, exiting read goroutine: %v", err)
+					return
+				}
+				time.Sleep(time.Second)
 				continue
 			}
 
-			n2, err := sock.WriteToUDP(b[:n], raddr)
+			ipPacketPayload := b[:n]
+
+			if t.server {
+				// Server mode: determine destination client from IP packet's destination
+				ipPkt := ipPacket(ipPacketPayload) // Use the ipPacket type from filter.go
+				if ipPkt.Version() != 4 {
+					t.log.Printf("Dropping non-IPv4 packet from TUN interface (version %d)", ipPkt.Version())
+					continue
+				}
+				_, dstTunIP := ipPkt.AddressesV4NetIP() // Get net.IP
+				if dstTunIP == nil {
+					t.log.Printf("Could not determine destination tunnel IP from TUN packet. Dropping.")
+					continue
+				}
+
+				// Avoid sending packets to self if server's TUN IP is the destination
+				serverLocalTunIP := net.ParseIP(t.tunLocalAddr)
+				if dstTunIP.Equal(serverLocalTunIP) {
+					t.log.Printf("Dropping packet from TUN destined for server's own tunnel IP: %s", dstTunIP.String())
+					continue
+				}
+
+				raddrInterface, ok := t.tunnelIPtoClient.Load(dstTunIP.String())
+				if !ok {
+					t.log.Printf("No known public UDP address for tunnel IP %s. Dropping packet.", dstTunIP.String())
+					continue
+				}
+				raddr := raddrInterface.(*net.UDPAddr)
+
+				if pf.Filter(ipPacketPayload) {
+					t.log.Printf("Outbound packet to %s (tunnel %s) dropped by filter", raddr.String(), dstTunIP.String())
+					continue
+				}
+				_, err = sock.WriteToUDP(ipPacketPayload, raddr)
+			} else { // Client mode
+				raddr := t.loadServerUDPAddr()
+				if raddr == nil {
+					continue // No server address known
+				}
+				if pf.Filter(ipPacketPayload) {
+					t.log.Printf("Outbound packet to server %s dropped by filter", raddr.String())
+					continue
+				}
+				_, err = sock.WriteToUDP(ipPacketPayload, raddr)
+			}
+
 			if err != nil {
 				if isDone(ctx) {
 					return
 				}
-				t.log.Printf("net write error: %v\n", err)
-
-				time.Sleep(time.Second)
-				continue
+				t.log.Printf("net write error: %v", err)
+				time.Sleep(time.Second) // Back off on write error
 			}
-			if n != n2 {
-				t.log.Printf("payload size: %d, written size: %d\n\n", n, n2)
-
-			}
-
 		}
 	}()
 
@@ -188,8 +248,7 @@ func (t tunnel) run(ctx context.Context) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		b := make([]byte, 1<<16)
-		var unwritten []byte
+		b := make([]byte, 1<<16) // Buffer for ReadFromUDP
 		for {
 			nr, raddr, err := sock.ReadFromUDP(b)
 			if err != nil {
@@ -201,63 +260,125 @@ func (t tunnel) run(ctx context.Context) {
 				continue
 			}
 
-			// We assume a matching magic prefix is sufficient to validate
-			// that the new IP is really the remote endpoint.
-			// We assume that any adversary capable of performing a replay
-			// attack already has the power to disrupt communication.
+			ipPayload := b[:nr]
+
 			if t.server {
-				t.updateRemoteAddr(raddr)
+				var session *clientSession
+				sessionInterface, loaded := t.activeClients.LoadOrStore(raddr.String(), &clientSession{
+					publicAddr: raddr,
+					lastActive: time.Now(),
+				})
+				session = sessionInterface.(*clientSession)
+				session.lastActive = time.Now()
+
+				if len(ipPayload) == 0 { // Heartbeat from client
+					// t.log.Printf("Received heartbeat from client %s", raddr.String())
+					continue // Processed heartbeat
+				}
+
+				// Data packet from client, learn/update its tunnel IP
+				ipPkt := ipPacket(ipPayload) // Use ipPacket type from filter.go
+				if ipPkt.Version() == 4 {
+					srcTunIP, _ := ipPkt.AddressesV4NetIP() // Get net.IP
+					if srcTunIP == nil {
+						t.log.Printf("Could not determine source tunnel IP from client %s. Dropping.", raddr.String())
+						continue
+					}
+
+					if session.tunnelIP == nil || !session.tunnelIP.Equal(srcTunIP) {
+						if session.tunnelIP != nil { // Client's tunnel IP changed for this public addr
+							t.log.Printf("Client %s changed tunnel IP from %s to %s", raddr.String(), session.tunnelIP.String(), srcTunIP.String())
+							t.tunnelIPtoClient.Delete(session.tunnelIP.String()) // Remove old mapping
+						}
+						session.tunnelIP = srcTunIP
+						t.tunnelIPtoClient.Store(srcTunIP.String(), raddr)
+						if loaded {
+							t.log.Printf("Updated tunnel IP for %s to %s", raddr.String(), srcTunIP.String())
+						} else {
+							t.log.Printf("Associated tunnel IP %s with client %s", srcTunIP.String(), raddr.String())
+						}
+					}
+				} else if len(ipPayload) > 0 { // Non-empty, non-IPv4 packet
+					t.log.Printf("Received non-IPv4 data packet from %s. Dropping.", raddr.String())
+					continue
+				}
+			} else { // Client mode
+				// Client receives a packet, presumably from the server.
+				// The original code updated remoteAddr for the server here, which is not needed for client.
+				// Client's server address is updated via DNS polling.
+				if len(ipPayload) == 0 {
+					// t.log.Printf("Client received heartbeat from server %s", raddr.String())
+					continue // Processed heartbeat
+				}
 			}
 
-			if nr == 0 {
-				continue // Assume empty packets are a form of pinging
-			}
-
-			x := append(unwritten, b[:nr]...)
-
-			if pf.Filter(x) {
+			if pf.Filter(ipPayload) {
+				// Log which client's packet was filtered if in server mode
+				// Additional logging can be added here if desired.
 				continue
 			}
 
-			nw, err := iface.Write(x)
+			_, err = iface.Write(ipPayload)
 			if err != nil {
 				if isDone(ctx) {
 					return
 				}
 				t.log.Printf("tun write error: %v", err)
 			}
-
-			if nr > nw {
-				offset := nr - nw
-				t.log.Printf("need to write %d more bytes", offset)
-				unwritten = x[offset:]
-			} else {
-				unwritten = nil
-			}
-
 		}
 	}()
 
 	<-ctx.Done()
 }
 
-func (t *tunnel) loadRemoteAddr() *net.UDPAddr {
-	addr, _ := t.remoteAddr.Load().(*net.UDPAddr)
+func (t *tunnel) loadServerUDPAddr() *net.UDPAddr {
+	if t.server {
+		return nil // Server doesn't have one single "remote"
+	}
+	addr, _ := t.serverUDPAddr.Load().(*net.UDPAddr)
 	return addr
 }
-func (t *tunnel) updateRemoteAddr(addr *net.UDPAddr) {
-	oldAddr := t.loadRemoteAddr()
+
+func (t *tunnel) updateServerUDPAddr(addr *net.UDPAddr) {
+	if t.server {
+		return // Server doesn't use this
+	}
+	oldAddr, _ := t.serverUDPAddr.Load().(*net.UDPAddr)
 	if addr != nil && (oldAddr == nil || !addr.IP.Equal(oldAddr.IP) || addr.Port != oldAddr.Port || addr.Zone != oldAddr.Zone) {
-		t.remoteAddr.Store(addr)
-		t.log.Printf("switching remote address: %v", addr)
+		t.serverUDPAddr.Store(addr)
+		t.log.Printf("switching remote server address: %v", addr)
+	}
+}
+
+func (t *tunnel) cleanupStaleClients(ctx context.Context, staleTimeout time.Duration) {
+	if staleTimeout == 0 {
+		staleTimeout = serverClientStaleTimeout
+	}
+	ticker := time.NewTicker(staleTimeout / 2)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			now := time.Now()
+			t.activeClients.Range(func(key interface{}, value interface{}) bool {
+				session := value.(*clientSession)
+				if now.Sub(session.lastActive) > staleTimeout {
+					clientAddrStr := key.(string)
+					t.log.Printf("Removing stale client session: %s (Tunnel IP: %s)", clientAddrStr, session.tunnelIP)
+					t.activeClients.Delete(key)
+					if session.tunnelIP != nil {
+						t.tunnelIPtoClient.Delete(session.tunnelIP.String())
+					}
+				}
+				return true // Continue iteration
+			})
+		}
 	}
 }
 
 func isDone(ctx context.Context) bool {
-	select {
-	case <-ctx.Done():
-		return true
-	default:
-		return false
-	}
+	return ctx.Err() != nil
 }

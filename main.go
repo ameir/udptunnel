@@ -106,21 +106,6 @@ type TunnelConfig struct {
 	// This field only applies to the client.
 	// The default value is 30.
 	HeartbeatInterval *uint
-
-	// PacketMagic is used to generate a sequence of bytes that is prepended to
-	// every TUN packet sent over UDP. Only inbound messages carrying the
-	// magic sequence will be accepted. This mechanism is used as a trivial way
-	// to protect against denial-of-service attacks by ensuring the server only
-	// responds to remote IP addresses that are validated.
-	//
-	// This validation mechanism is only intended to protect against adversaries
-	// with the ability to create arbitrary spoof UDP packets. It does not
-	// protect against man-in-the-middle (MITM) attacks since any attacker with
-	// the ability to intercept traffic already has the capability to block
-	// communication between the client and server.
-	//
-	// This value must match on both the client and server.
-	PacketMagic string `json:",omitempty"`
 }
 
 func loadConfig(conf string) (tunn tunnel, logger *log.Logger, closer func() error) {
