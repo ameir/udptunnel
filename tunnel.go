@@ -2,7 +2,6 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE.md file.
 
-
 package main
 
 import (
@@ -17,7 +16,6 @@ import (
 	"github.com/libp2p/go-reuseport"
 	tun "github.com/sina-ghaderi/tunnel"
 )
-
 
 type logger interface {
 	Fatalf(string, ...interface{})
@@ -70,7 +68,7 @@ func (t tunnel) run(ctx context.Context) {
 	}
 
 	// Create a new tunnel device (requires root privileges).
-	tunCfg := tun.Config{DisableGsoGro: true, Name: t.tunDevName}
+	tunCfg := tun.Config{Name: t.tunDevName, DisableGsoGro: true}
 	iface, err := tun.New(tunCfg)
 	if err != nil {
 		t.log.Fatalf("error creating tun device: %v", err)
@@ -171,6 +169,13 @@ func (t tunnel) run(ctx context.Context) {
 	go func() {
 		defer wg.Done()
 		b := make([]byte, 1<<16)
+		var parsedServerLocalTunIP net.IP
+		if t.server {
+			parsedServerLocalTunIP = net.ParseIP(t.tunLocalAddr)
+			if parsedServerLocalTunIP == nil {
+				t.log.Fatalf("failed to parse server's local tunnel IP: %s", t.tunLocalAddr)
+			}
+		}
 		for {
 			n, err := iface.Read(b)
 			if err != nil {
@@ -204,8 +209,7 @@ func (t tunnel) run(ctx context.Context) {
 				}
 
 				// Avoid sending packets to self if server's TUN IP is the destination
-				serverLocalTunIP := net.ParseIP(t.tunLocalAddr)
-				if dstTunIP.Equal(serverLocalTunIP) {
+				if dstTunIP.Equal(parsedServerLocalTunIP) {
 					t.log.Printf("Dropping packet from TUN destined for server's own tunnel IP: %s", dstTunIP.String())
 					continue
 				}
@@ -318,12 +322,17 @@ func (t tunnel) run(ctx context.Context) {
 				continue
 			}
 
-			_, err = iface.Write(ipPayload)
+			nw, err := iface.Write(ipPayload)
 			if err != nil {
 				if isDone(ctx) {
 					return
 				}
 				t.log.Printf("tun write error: %v", err)
+			}
+
+			if nr > nw {
+				offset := nr - nw
+				t.log.Printf("need to write %d more bytes", offset)
 			}
 		}
 	}()

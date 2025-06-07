@@ -4,31 +4,7 @@
 
 package main
 
-import (
-	"encoding/binary"
-	"sync/atomic"
-	"time"
-	"net"
-)
-
-// The length of time before entries in the filter map are considered stale.
-const expireTimeout = 300
-
-// The current timestamp in seconds. Must be read using atomic operations.
-var atomicNow uint64
-
-func init() {
-	atomicNow = uint64(time.Now().Unix())
-	go func() {
-		for range time.Tick(time.Second) {
-			atomic.AddUint64(&atomicNow, 1)
-		}
-	}()
-}
-
-var timeNow = func() uint64 {
-	return atomic.LoadUint64(&atomicNow)
-}
+import "net"
 
 const (
 	icmp = 1
@@ -62,7 +38,7 @@ func (ip ipPacket) AddressesV4() (src, dst [4]byte) {
 
 // AddressesV4NetIP returns the source and destination IPv4 addresses as net.IP.
 // It returns nil IPs if the packet is not IPv4 or is too short.
-func (ip ipPacket) AddressesV4NetIP() (src, dst net.IP ) {
+func (ip ipPacket) AddressesV4NetIP() (src, dst net.IP) {
 	if len(ip) < 20 || ip.Version() != 4 { // Check length and version
 		return nil, nil
 	}
@@ -80,29 +56,11 @@ func (ip ipPacket) Body() []byte {
 	return ip[4*n:]
 }
 
-type transportPacket []byte
-
-func (tp transportPacket) Ports() (src, dst uint16) {
-	if len(tp) >= 4 {
-		src = binary.BigEndian.Uint16(tp[:2])
-		dst = binary.BigEndian.Uint16(tp[2:])
-	}
-	return
-}
-
-type portFilter struct {
-	// Last time a packet was transmitted on some ephemeral source port.
-	outMap [1 << 16]uint64 // [port]time
-
-	// Last time a packet was received from some ephemeral source port.
-	inMap [1 << 16]uint64 // [port]time
-
-}
+type portFilter struct{}
 
 func newPortFilter() *portFilter {
 	return &portFilter{}
 }
-
 func (sf *portFilter) Filter(b []byte) (drop bool) {
 	// This logic assumes malformed IP packets are rejected by the Linux kernel.
 	ip := ipPacket(b)
