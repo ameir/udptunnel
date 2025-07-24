@@ -118,47 +118,43 @@ func (t tunnel) run(ctx context.Context) {
 	// On the client, start some goroutines to accommodate for the dynamically
 	// changing environment that the client may be in.
 	if !t.server {
-		// Since the remote address could change due to updates to DNS,
-		// periodically check DNS for a new address.
-		raddr, err := net.ResolveUDPAddr("udp4", t.netAddr)
-		if err != nil {
-			t.log.Fatalf("error resolving address: %v", err)
-		}
-		t.updateServerUDPAddr(raddr)
+		// This single goroutine handles all periodic client-side tasks:
+		// 1. Resolves the server's DNS address to handle dynamic IP changes.
+		// 2. Sends periodic heartbeats (if configured) to maintain NAT state.
 		go func() {
-			ticker := time.NewTicker(30 * time.Second)
-			defer ticker.Stop()
-			for range ticker.C {
-				raddr, _ := net.ResolveUDPAddr("udp4", t.netAddr)
-				if isDone(ctx) || raddr == nil {
+			// Use the configured heartbeat interval, or a 30s default for DNS-only checks.
+			if t.beatInterval == 0 {
+				t.beatInterval = 30 * time.Second
+				t.log.Printf("setting default heartbeat interval: %d", t.beatInterval)
+			}
+
+			// Define the task to be run periodically.
+			task := func() {
+				raddr, err := net.ResolveUDPAddr("udp4", t.netAddr)
+				if err != nil {
+					t.log.Printf("error resolving server address: %v", err)
 					return
 				}
 				t.updateServerUDPAddr(raddr)
-			}
-		}()
 
-		// Since the local address could change due to switching interfaces
-		// (e.g., switching from cellular hotspot to hardwire ethernet),
-		// periodically ping the server to inform it of our new UDP address.
-		// Sending a packet with only the magic header is sufficient.
-		go func() {
-			if t.beatInterval == 0 {
-				return
+				// If heartbeats are enabled, send one to the latest address.
+				if t.beatInterval > 0 && raddr != nil {
+					if _, err := sock.WriteToUDP([]byte{}, raddr); err != nil && !isDone(ctx) {
+						t.log.Printf("client heartbeat send error: %v", err)
+					}
+				}
 			}
+
+			task() // Run once immediately.
+
 			ticker := time.NewTicker(t.beatInterval)
 			defer ticker.Stop()
-			for range ticker.C {
-				if isDone(ctx) { // Stop if done.
+			for {
+				select {
+				case <-ctx.Done():
 					return
-				}
-				raddr := t.loadServerUDPAddr()
-				if raddr == nil { // Skip if no remote endpoint.
-					continue
-				}
-				// Send empty UDP packet as heartbeat
-				_, err := sock.WriteToUDP([]byte{}, raddr)
-				if err != nil && !isDone(ctx) {
-					t.log.Printf("client heartbeat send error: %v", err)
+				case <-ticker.C:
+					task()
 				}
 			}
 		}()
