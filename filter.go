@@ -4,7 +4,9 @@
 
 package main
 
-import "net"
+import (
+	"net"
+)
 
 const (
 	icmp = 1
@@ -36,12 +38,8 @@ func (ip ipPacket) AddressesV4() (src, dst [4]byte) {
 	return
 }
 
-// AddressesV4NetIP returns the source and destination IPv4 addresses as net.IP.
-// It returns nil IPs if the packet is not IPv4 or is too short.
-func (ip ipPacket) AddressesV4NetIP() (src, dst net.IP) {
-	if len(ip) < 20 || ip.Version() != 4 { // Check length and version
-		return nil, nil
-	}
+// AddressesNetIP returns the source and destination IPv4 addresses as net.IP.
+func (ip ipPacket) AddressesNetIP() (src, dst net.IP) {
 	return net.IP(ip[12:16]), net.IP(ip[16:20])
 }
 
