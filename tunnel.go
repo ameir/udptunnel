@@ -5,6 +5,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"net"
 	"os/exec"
@@ -139,7 +140,7 @@ func (t tunnel) run(ctx context.Context) {
 
 				// If heartbeats are enabled, send one to the latest address.
 				if raddr != nil {
-					if _, err := sock.WriteToUDP([]byte{}, raddr); err != nil && !isDone(ctx) {
+					if _, err := sock.WriteToUDP([]byte("ping"), raddr); err != nil && !isDone(ctx) {
 						t.log.Printf("client heartbeat send error: %v", err)
 					}
 					t.log.Printf("sent client heartbeat: %v", raddr)
@@ -263,33 +264,31 @@ func (t tunnel) run(ctx context.Context) {
 			ipPayload := b[:nr]
 
 			if t.server {
-				var session *clientSession
-				sessionInterface, loaded := t.activeClients.LoadOrStore(raddr.String(), &clientSession{
-					publicAddr: raddr,
-					lastActive: time.Now(),
-				})
-				session = sessionInterface.(*clientSession)
-				session.lastActive = time.Now()
 
-				ipPkt := ipPacket(ipPayload) // Use ipPacket type from filter.go
-				if len(ipPayload) == 0 {     // Heartbeat from client
+				ipPkt := ipPacket(ipPayload)                // Use ipPacket type from filter.go
+				if bytes.Equal(ipPayload, []byte("ping")) { // Heartbeat from client
+
+					var session *clientSession
+					sessionInterface, _ := t.activeClients.LoadOrStore(raddr.String(), &clientSession{
+						publicAddr: raddr,
+						lastActive: time.Now(),
+					})
+					session = sessionInterface.(*clientSession)
+					session.lastActive = time.Now()
 
 					srcTunIP, _ := ipPkt.AddressesNetIP() // Get net.IP
-					//	t.log.Printf("srcTunIP: %s\n", srcTunIP.String())
+					t.log.Printf("raddr: %s\n", raddr.String())
+					t.log.Printf("srcTunIP: %s\n", srcTunIP.String())
 					if srcTunIP == nil {
 						t.log.Printf("Could not determine source tunnel IP from client %s. Dropping.", raddr.String())
 						continue
 					}
 
-					if session.tunnelIP == nil || !session.tunnelIP.Equal(srcTunIP) {
+					if session.tunnelIP == nil {
 						t.log.Printf("Client %s changed tunnel IP from %s to %s", raddr.String(), session.tunnelIP.String(), srcTunIP.String())
 						session.tunnelIP = srcTunIP
 						t.tunnelIPtoClient.Store(srcTunIP.String(), raddr)
-						if loaded {
-							t.log.Printf("Updated tunnel IP for %s to %s", raddr.String(), srcTunIP.String())
-						} else {
-							t.log.Printf("Associated tunnel IP %s with client %s", srcTunIP.String(), raddr.String())
-						}
+						t.log.Printf("Updated tunnel IP for %s to %s", raddr.String(), srcTunIP.String())
 					}
 
 					t.log.Printf("Received heartbeat from client %s (%s)", raddr.String(), session.tunnelIP.String())
@@ -306,10 +305,8 @@ func (t tunnel) run(ctx context.Context) {
 				// Client receives a packet, presumably from the server.
 				// The original code updated remoteAddr for the server here, which is not needed for client.
 				// Client's server address is updated via DNS polling.
-				if len(ipPayload) == 0 {
-					t.log.Printf("Client received heartbeat from server %s", raddr.String())
-					continue // Processed heartbeat
-				}
+				// t.log.Printf("Client received data packet from server %s", raddr.String())
+				// continue // Processed heartbeat
 			}
 
 			if pf.Filter(ipPayload) {
