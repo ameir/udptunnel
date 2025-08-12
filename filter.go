@@ -5,6 +5,7 @@
 package main
 
 import (
+	"fmt"
 	"net"
 )
 
@@ -15,6 +16,10 @@ const (
 )
 
 type ipPacket []byte
+
+func (ip ipPacket) Length() int {
+	return len(ip)
+}
 
 func (ip ipPacket) Version() int {
 	if len(ip) > 0 {
@@ -41,6 +46,11 @@ func (ip ipPacket) AddressesV4() (src, dst [4]byte) {
 // AddressesNetIP returns the source and destination IPv4 addresses as net.IP.
 // It returns nil IPs if the packet is not IPv4 or is too short.
 func (ip ipPacket) AddressesNetIP() (src, dst net.IP) {
+	if ip.Length() < 20 {
+		fmt.Println("ipPacket too short: ", ip.Length())
+		return nil, nil
+	}
+
 	// fmt.Printf("ipPacket: %+v\n", ip)
 	// fmt.Printf("src: %s\n", net.IP(ip[12:16]).String())
 	// fmt.Printf("dst: %s\n", net.IP(ip[16:20]).String())

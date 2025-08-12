@@ -5,7 +5,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"net"
 	"os/exec"
@@ -140,7 +139,7 @@ func (t tunnel) run(ctx context.Context) {
 
 				// If heartbeats are enabled, send one to the latest address.
 				if raddr != nil {
-					if _, err := sock.WriteToUDP([]byte("ping"), raddr); err != nil && !isDone(ctx) {
+					if _, err := sock.WriteToUDP([]byte{}, raddr); err != nil && !isDone(ctx) {
 						t.log.Printf("client heartbeat send error: %v", err)
 					}
 					t.log.Printf("sent client heartbeat: %v", raddr)
@@ -265,9 +264,8 @@ func (t tunnel) run(ctx context.Context) {
 
 			if t.server {
 
-				ipPkt := ipPacket(ipPayload)                // Use ipPacket type from filter.go
-				if bytes.Equal(ipPayload, []byte("ping")) { // Heartbeat from client
-
+				ipPkt := ipPacket(ipPayload) // Use ipPacket type from filter.go
+				if len(ipPayload) == 0 {     // Heartbeat from client
 					var session *clientSession
 					sessionInterface, _ := t.activeClients.LoadOrStore(raddr.String(), &clientSession{
 						publicAddr: raddr,
@@ -302,11 +300,10 @@ func (t tunnel) run(ctx context.Context) {
 				}
 
 			} else { // Client mode
-				// Client receives a packet, presumably from the server.
-				// The original code updated remoteAddr for the server here, which is not needed for client.
-				// Client's server address is updated via DNS polling.
-				// t.log.Printf("Client received data packet from server %s", raddr.String())
-				// continue // Processed heartbeat
+				if len(ipPayload) == 0 {
+					t.log.Printf("Client received heartbeat from server %s", raddr.String())
+					continue // Processed heartbeat
+				}
 			}
 
 			if pf.Filter(ipPayload) {
