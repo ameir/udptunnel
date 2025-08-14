@@ -274,8 +274,6 @@ func (t tunnel) run(ctx context.Context) {
 					// check if heartbeat
 					if strings.HasPrefix(string(ipPayload), "ping|") { // Heartbeat from client
 						clientTunIp := strings.TrimPrefix(string(ipPayload), "ping|")
-						t.log.Printf("raddr: %s\n", raddr.String())
-						t.log.Printf("clientTunIp: %s\n", clientTunIp)
 
 						var session *clientSession
 						sessionInterface, _ := t.activeClients.LoadOrStore(raddr.String(), &clientSession{
