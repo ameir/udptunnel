@@ -4,10 +4,7 @@
 
 package main
 
-import (
-	"fmt"
-	"net"
-)
+import "net"
 
 const (
 	icmp = 1
@@ -44,18 +41,17 @@ func (ip ipPacket) AddressesV4() (src, dst [4]byte) {
 }
 
 // AddressesNetIP returns the source and destination IPv4 addresses as net.IP.
-// It returns nil IPs if the packet is not IPv4 or is too short.
 func (ip ipPacket) AddressesNetIP() (src, dst net.IP) {
-	if ip.Length() < 20 {
-		fmt.Println("ipPacket too short: ", ip.Length())
+	return net.IP(ip[12:16]), net.IP(ip[16:20])
+}
+
+// AddressesV4NetIP returns the source and destination IPv4 addresses as net.IP.
+// It returns nil IPs if the packet is not IPv4 or is too short.
+func (ip ipPacket) AddressesV4NetIP() (src, dst net.IP) {
+	if ip.Length() < 20 || ip.Version() != 4 { // Check length and version
 		return nil, nil
 	}
-
-	// fmt.Printf("ipPacket: %+v\n", ip)
-	// fmt.Printf("src: %s\n", net.IP(ip[12:16]).String())
-	// fmt.Printf("dst: %s\n", net.IP(ip[16:20]).String())
-
-	return net.IP(ip[12:16]), net.IP(ip[16:20])
+	return ip.AddressesNetIP()
 }
 
 func (ip ipPacket) Body() []byte {
@@ -74,6 +70,7 @@ type portFilter struct{}
 func newPortFilter() *portFilter {
 	return &portFilter{}
 }
+
 func (sf *portFilter) Filter(b []byte) (drop bool) {
 	// This logic assumes malformed IP packets are rejected by the Linux kernel.
 	ip := ipPacket(b)
