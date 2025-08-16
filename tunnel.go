@@ -50,6 +50,7 @@ type clientSession struct {
 
 // serverClientStaleTimeout defines how long before an inactive client session is removed by the server.
 const serverClientStaleTimeout = 90 * time.Second
+const pingPrefix = "ping|"
 
 // ipPacket is an IP packet. The slice is the packet data.
 
@@ -66,7 +67,7 @@ func (t tunnel) run(ctx context.Context) {
 	if t.server {
 		t.activeClients = &sync.Map{}
 		t.tunnelIPtoClient = &sync.Map{}
-		//	go t.cleanupStaleClients(ctx, serverClientStaleTimeout) // disable for now
+		go t.cleanupStaleClients(ctx, serverClientStaleTimeout)
 	}
 
 	// Create a new tunnel device (requires root privileges).
@@ -141,8 +142,7 @@ func (t tunnel) run(ctx context.Context) {
 
 				// If heartbeats are enabled, send one to the latest address.
 				if raddr != nil {
-					// ping|ip
-					if _, err := sock.WriteToUDP(fmt.Append(nil, "ping|", t.tunLocalAddr), raddr); err != nil && !isDone(ctx) {
+					if _, err := sock.WriteToUDP(fmt.Append(nil, pingPrefix, t.tunLocalAddr), raddr); err != nil && !isDone(ctx) {
 						t.log.Printf("client heartbeat send error: %v", err)
 					}
 					t.log.Printf("sent client heartbeat: %v", raddr)
@@ -272,8 +272,8 @@ func (t tunnel) run(ctx context.Context) {
 				if ipPkt.Version() != 4 {
 
 					// check if heartbeat
-					if strings.HasPrefix(string(ipPayload), "ping|") { // Heartbeat from client
-						clientTunIp := strings.TrimPrefix(string(ipPayload), "ping|")
+					if strings.HasPrefix(string(ipPayload), pingPrefix) { // Heartbeat from client
+						clientTunIp := strings.TrimPrefix(string(ipPayload), pingPrefix)
 
 						var session *clientSession
 						sessionInterface, _ := t.activeClients.LoadOrStore(raddr.String(), &clientSession{
