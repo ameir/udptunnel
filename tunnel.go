@@ -367,8 +367,15 @@ func (t *tunnel) cleanupStaleClients(ctx context.Context, staleTimeout time.Dura
 					clientAddrStr := key.(string)
 					t.log.Printf("Removing stale client session: %s (Tunnel IP: %s)", clientAddrStr, session.tunnelIP)
 					t.activeClients.Delete(key)
-					if session.tunnelIP != "" {
-						t.tunnelIPtoClient.Delete(session.tunnelIP)
+
+					// if a client's public IP changes, don't delete the tunnelIPtoClient mapping
+					if raddrInterface, ok := t.tunnelIPtoClient.Load(session.tunnelIP); ok {
+						raddr := raddrInterface.(*net.UDPAddr)
+						if clientAddrStr == raddr.String() {
+							t.tunnelIPtoClient.Delete(session.tunnelIP)
+						} else {
+							t.log.Printf("Public IP for tunnel IP %s changed from %s to %s", session.tunnelIP, clientAddrStr, raddr.String())
+						}
 					}
 				}
 				return true // Continue iteration
