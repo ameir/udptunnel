@@ -19,6 +19,13 @@ import (
 	tun "github.com/sina-ghaderi/tunnel"
 )
 
+// Buffer pool for packet processing to reduce allocation overhead
+var packetBufferPool = sync.Pool{
+	New: func() interface{} {
+		return make([]byte, 1<<16) // 64KB buffers
+	},
+}
+
 type logger interface {
 	Fatalf(string, ...interface{})
 	Printf(string, ...interface{})
@@ -168,7 +175,6 @@ func (t tunnel) run(ctx context.Context) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		b := make([]byte, 1<<16)
 		var parsedServerLocalTunIP net.IP
 		if t.server {
 			parsedServerLocalTunIP = net.ParseIP(t.tunLocalAddr)
@@ -177,6 +183,9 @@ func (t tunnel) run(ctx context.Context) {
 			}
 		}
 		for {
+			b := packetBufferPool.Get().([]byte)
+			defer packetBufferPool.Put(b)
+
 			n, err := iface.Read(b)
 			if err != nil {
 				if isDone(ctx) {
@@ -251,8 +260,10 @@ func (t tunnel) run(ctx context.Context) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		b := make([]byte, 1<<16) // Buffer for ReadFromUDP
 		for {
+			b := packetBufferPool.Get().([]byte)
+			defer packetBufferPool.Put(b)
+
 			nr, raddr, err := sock.ReadFromUDP(b)
 			if err != nil {
 				if isDone(ctx) {
