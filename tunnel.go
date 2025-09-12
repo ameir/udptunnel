@@ -285,7 +285,7 @@ func (t tunnel) run(ctx context.Context) {
 
 						if session.tunnelIP == "" { // only need to register IP first time since it shouldn't change
 							if raddrInterface, ok := t.tunnelIPtoClient.Load(clientTunIp); ok {
-								t.log.Printf("Client %s changed public IP from %s to %s", clientTunIp, raddrInterface.(*net.UDPAddr).String(), raddr)
+								t.log.Printf("Client %s changed public IP from %s to %s", clientTunIp, raddrInterface.(*net.UDPAddr).String(), raddr.String())
 							}
 							session.tunnelIP = clientTunIp
 							t.tunnelIPtoClient.Store(clientTunIp, raddr)
