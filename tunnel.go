@@ -168,14 +168,17 @@ func (t tunnel) run(ctx context.Context) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		b := make([]byte, 1<<16)
 		var parsedServerLocalTunIP net.IP
+		var raddr *net.UDPAddr
+
 		if t.server {
 			parsedServerLocalTunIP = net.ParseIP(t.tunLocalAddr)
 			if parsedServerLocalTunIP == nil {
 				t.log.Fatalf("failed to parse server's local tunnel IP: %s", t.tunLocalAddr)
 			}
 		}
+
+		b := make([]byte, 1<<16)
 		for {
 			n, err := iface.Read(b)
 			if err != nil {
@@ -224,7 +227,6 @@ func (t tunnel) run(ctx context.Context) {
 					t.log.Printf("Outbound packet to %s (tunnel %s) dropped by filter", raddr.String(), dstTunIP.String())
 					continue
 				}
-				_, err = sock.WriteToUDP(ipPacketPayload, raddr)
 			} else { // Client mode
 				raddr := t.loadServerUDPAddr()
 				if raddr == nil {
@@ -234,9 +236,9 @@ func (t tunnel) run(ctx context.Context) {
 					t.log.Printf("Outbound packet to server %s dropped by filter", raddr.String())
 					continue
 				}
-				_, err = sock.WriteToUDP(ipPacketPayload, raddr)
 			}
 
+			_, err = sock.WriteToUDP(ipPacketPayload, raddr)
 			if err != nil {
 				if isDone(ctx) {
 					return
