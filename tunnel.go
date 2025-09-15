@@ -178,9 +178,10 @@ func (t tunnel) run(ctx context.Context) {
 			}
 		}
 
-		b := make([]byte, 1<<16)
+		buffer := make([]byte, 1<<16)
+		var overflow []byte // Buffer for overflow
 		for {
-			n, err := iface.Read(b)
+			n, err := iface.Read(buffer)
 			if err != nil {
 				if isDone(ctx) {
 					return
@@ -196,7 +197,7 @@ func (t tunnel) run(ctx context.Context) {
 				continue
 			}
 
-			ipPacketPayload := b[:n]
+			ipPacketPayload := buffer[:n]
 
 			if t.server {
 				// Server mode: determine destination client from IP packet's destination
@@ -238,13 +239,28 @@ func (t tunnel) run(ctx context.Context) {
 				}
 			}
 
-			_, err = sock.WriteToUDP(ipPacketPayload, raddr)
+			if len(overflow) > 0 {
+				t.log.Printf("carrying overflow of %d bytes from previous read", len(overflow))
+				//	ipPacketPayload = append(overflow, ipPacketPayload...)
+			}
+
+			nw, err := sock.WriteToUDP(ipPacketPayload, raddr)
 			if err != nil {
 				if isDone(ctx) {
 					return
 				}
 				t.log.Printf("net write error: %v", err)
 				time.Sleep(time.Second) // Back off on write error
+			}
+
+			t.log.Printf("read %d bytes, wrote %d bytes (outbound)", n, nw)
+
+			if len(ipPacketPayload) > nw {
+				offset := len(ipPacketPayload) - nw
+				//		overflow = ipPacketPayload[nw:]
+				t.log.Printf("need to write %d more bytes (outbound)", offset)
+			} else {
+				overflow = nil
 			}
 		}
 	}()
@@ -253,9 +269,10 @@ func (t tunnel) run(ctx context.Context) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		b := make([]byte, 1<<16) // Buffer for ReadFromUDP
+		buffer := make([]byte, 1<<16) // Buffer for ReadFromUDP
+		var overflow []byte           // Buffer for overflow
 		for {
-			nr, raddr, err := sock.ReadFromUDP(b)
+			nr, raddr, err := sock.ReadFromUDP(buffer)
 			if err != nil {
 				if isDone(ctx) {
 					return
@@ -265,7 +282,11 @@ func (t tunnel) run(ctx context.Context) {
 				continue
 			}
 
-			ipPayload := b[:nr]
+			ipPayload := buffer[:nr]
+
+			if len(overflow) > 0 {
+				t.log.Printf("carrying overflow of %d bytes from previous read", len(overflow))
+			}
 
 			if t.server {
 
@@ -315,6 +336,7 @@ func (t tunnel) run(ctx context.Context) {
 				continue
 			}
 
+			ipPayload = append(overflow, ipPayload...)
 			nw, err := iface.Write(ipPayload)
 			if err != nil {
 				if isDone(ctx) {
@@ -323,9 +345,12 @@ func (t tunnel) run(ctx context.Context) {
 				t.log.Printf("tun write error: %v", err)
 			}
 
-			if nr > nw {
-				offset := nr - nw
-				t.log.Printf("need to write %d more bytes", offset)
+			if len(ipPayload) > nw {
+				offset := len(ipPayload) - nw
+				overflow = ipPayload[nw:]
+				t.log.Printf("need to write %d more bytes (inbound)", offset)
+			} else {
+				overflow = nil
 			}
 		}
 	}()
