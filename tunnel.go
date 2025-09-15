@@ -221,14 +221,14 @@ func (t tunnel) run(ctx context.Context) {
 					t.log.Printf("No known public UDP address for tunnel IP %s. Dropping packet.", dstTunIP.String())
 					continue
 				}
-				raddr := raddrInterface.(*net.UDPAddr)
+				raddr = raddrInterface.(*net.UDPAddr)
 
 				if pf.Filter(ipPacketPayload) {
 					t.log.Printf("Outbound packet to %s (tunnel %s) dropped by filter", raddr.String(), dstTunIP.String())
 					continue
 				}
 			} else { // Client mode
-				raddr := t.loadServerUDPAddr()
+				raddr = t.loadServerUDPAddr()
 				if raddr == nil {
 					continue // No server address known
 				}
@@ -246,6 +246,9 @@ func (t tunnel) run(ctx context.Context) {
 				t.log.Printf("net write error: %v", err)
 				time.Sleep(time.Second) // Back off on write error
 			}
+
+			//	t.log.Printf("read %d bytes, wrote %d bytes (outbound)", n, nw)
+
 		}
 	}()
 
