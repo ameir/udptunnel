@@ -222,14 +222,14 @@ func (t tunnel) run(ctx context.Context) {
 					t.log.Printf("No known public UDP address for tunnel IP %s. Dropping packet.", dstTunIP.String())
 					continue
 				}
-				raddr := raddrInterface.(*net.UDPAddr)
+				raddr = raddrInterface.(*net.UDPAddr)
 
 				if pf.Filter(ipPacketPayload) {
 					t.log.Printf("Outbound packet to %s (tunnel %s) dropped by filter", raddr.String(), dstTunIP.String())
 					continue
 				}
 			} else { // Client mode
-				raddr := t.loadServerUDPAddr()
+				raddr = t.loadServerUDPAddr()
 				if raddr == nil {
 					continue // No server address known
 				}
@@ -241,7 +241,7 @@ func (t tunnel) run(ctx context.Context) {
 
 			if len(overflow) > 0 {
 				t.log.Printf("carrying overflow of %d bytes from previous read", len(overflow))
-				//	ipPacketPayload = append(overflow, ipPacketPayload...)
+				ipPacketPayload = append(overflow, ipPacketPayload...)
 			}
 
 			nw, err := sock.WriteToUDP(ipPacketPayload, raddr)
@@ -253,11 +253,9 @@ func (t tunnel) run(ctx context.Context) {
 				time.Sleep(time.Second) // Back off on write error
 			}
 
-			t.log.Printf("read %d bytes, wrote %d bytes (outbound)", n, nw)
-
 			if len(ipPacketPayload) > nw {
 				offset := len(ipPacketPayload) - nw
-				//		overflow = ipPacketPayload[nw:]
+				overflow = ipPacketPayload[nw:]
 				t.log.Printf("need to write %d more bytes (outbound)", offset)
 			} else {
 				overflow = nil
@@ -283,10 +281,6 @@ func (t tunnel) run(ctx context.Context) {
 			}
 
 			ipPayload := buffer[:nr]
-
-			if len(overflow) > 0 {
-				t.log.Printf("carrying overflow of %d bytes from previous read", len(overflow))
-			}
 
 			if t.server {
 
@@ -336,7 +330,11 @@ func (t tunnel) run(ctx context.Context) {
 				continue
 			}
 
-			ipPayload = append(overflow, ipPayload...)
+			if len(overflow) > 0 {
+				t.log.Printf("carrying overflow of %d bytes from previous read", len(overflow))
+				ipPayload = append(overflow, ipPayload...)
+			}
+
 			nw, err := iface.Write(ipPayload)
 			if err != nil {
 				if isDone(ctx) {
