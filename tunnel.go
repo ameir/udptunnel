@@ -300,16 +300,12 @@ func (t tunnel) run(ctx context.Context) {
 						session = sessionInterface.(*clientSession)
 						session.lastActive = time.Now()
 
-						if session.tunnelIP == "" { // only need to register IP first time since it shouldn't change
-							if raddrInterface, ok := t.tunnelIPtoClient.Load(clientTunIp); ok {
-								t.log.Printf("Client %s changed public IP from %s to %s", clientTunIp, raddrInterface.(*net.UDPAddr).String(), raddr.String())
-							}
+						t.log.Printf("Received heartbeat from client %s (%s)", raddr.String(), session.tunnelIP)
+						if _, ok := t.tunnelIPtoClient.Load(clientTunIp); !ok || session.tunnelIP == "" {
 							session.tunnelIP = clientTunIp
 							t.tunnelIPtoClient.Store(clientTunIp, raddr)
 							t.log.Printf("Updated tunnel IP for %s to %s", raddr.String(), clientTunIp)
 						}
-						t.log.Printf("Received heartbeat from client %s (%s)", raddr.String(), session.tunnelIP)
-
 						continue // Processed heartbeat
 					} else {
 						t.log.Printf("Received non-IPv4 data packet from %s. Dropping.", raddr.String())
