@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"net"
 	"os/exec"
@@ -25,12 +26,13 @@ type logger interface {
 }
 
 type tunnel struct {
-	server        bool
-	tunDevName    string
-	tunLocalAddr  string
-	tunRemoteAddr string
-	netAddr       string
-	beatInterval  time.Duration
+	server          bool
+	tunDevName      string
+	tunLocalAddr    string
+	tunRemoteAddr   string
+	netAddr         string
+	beatInterval    time.Duration
+	disableGsoGro   bool
 
 	log logger
 
@@ -71,7 +73,7 @@ func (t tunnel) run(ctx context.Context) {
 	}
 
 	// Create a new tunnel device (requires root privileges).
-	tunCfg := tun.Config{Name: t.tunDevName, DisableGsoGro: true}
+	tunCfg := tun.Config{Name: t.tunDevName, DisableGsoGro: t.disableGsoGro}
 	iface, err := tun.New(tunCfg)
 	if err != nil {
 		t.log.Fatalf("error creating tun device: %v", err)
@@ -169,7 +171,6 @@ func (t tunnel) run(ctx context.Context) {
 	go func() {
 		defer wg.Done()
 		var parsedServerLocalTunIP net.IP
-		var raddr *net.UDPAddr
 
 		if t.server {
 			parsedServerLocalTunIP = net.ParseIP(t.tunLocalAddr)
@@ -179,17 +180,15 @@ func (t tunnel) run(ctx context.Context) {
 		}
 
 		buffer := make([]byte, 1<<16)
-		var overflow []byte // Buffer for overflow
+		var overflow []byte
 		for {
 			n, err := iface.Read(buffer)
 			if err != nil {
 				if isDone(ctx) {
 					return
 				}
-				// Log non-fatal TUN read errors and attempt to continue.
-				// Certain errors might indicate the TUN device is closed, warranting goroutine exit.
 				t.log.Printf("tun read error: %v; attempting to continue", err)
-				if err.Error() == "read /dev/net/tun: file already closed" || err.Error() == "read /dev/utun: file already closed" { // Example check
+				if err.Error() == "read /dev/net/tun: file already closed" || err.Error() == "read /dev/utun: file already closed" {
 					t.log.Printf("TUN device appears closed, exiting read goroutine: %v", err)
 					return
 				}
@@ -197,68 +196,59 @@ func (t tunnel) run(ctx context.Context) {
 				continue
 			}
 
-			ipPacketPayload := buffer[:n]
-
-			if t.server {
-				// Server mode: determine destination client from IP packet's destination
-				ipPkt := ipPacket(ipPacketPayload) // Use the ipPacket type from filter.go
-
-				_, dstTunIP := ipPkt.AddressesV4NetIP() // Get net.IP
-				//	t.log.Printf("dstTunIP: %s\n", dstTunIP.String())
-				if dstTunIP == nil {
-					t.log.Printf("Could not determine destination tunnel IP from TUN packet. Dropping.")
-					continue
-				}
-
-				// Avoid sending packets to self if server's TUN IP is the destination
-				if dstTunIP.Equal(parsedServerLocalTunIP) {
-					t.log.Printf("Dropping packet from TUN destined for server's own tunnel IP: %s", dstTunIP.String())
-					continue
-				}
-
-				raddrInterface, ok := t.tunnelIPtoClient.Load(dstTunIP.String())
-				//	t.log.Printf("raddrInterface: %s\n", raddrInterface)
-				if !ok {
-					t.log.Printf("No known public UDP address for tunnel IP %s. Dropping packet.", dstTunIP.String())
-					continue
-				}
-				raddr = raddrInterface.(*net.UDPAddr)
-
-				if pf.Filter(ipPacketPayload) {
-					t.log.Printf("Outbound packet to %s (tunnel %s) dropped by filter", raddr.String(), dstTunIP.String())
-					continue
-				}
-			} else { // Client mode
-				raddr = t.loadServerUDPAddr()
-				if raddr == nil {
-					continue // No server address known
-				}
-				if pf.Filter(ipPacketPayload) {
-					t.log.Printf("Outbound packet to server %s dropped by filter", raddr.String())
-					continue
-				}
-			}
-
+			data := buffer[:n]
 			if len(overflow) > 0 {
-				t.log.Printf("carrying overflow of %d bytes from previous read", len(overflow))
-				ipPacketPayload = append(overflow, ipPacketPayload...)
-			}
-
-			nw, err := sock.WriteToUDP(ipPacketPayload, raddr)
-			if err != nil {
-				if isDone(ctx) {
-					return
-				}
-				t.log.Printf("net write error: %v", err)
-				time.Sleep(time.Second) // Back off on write error
-			}
-
-			if len(ipPacketPayload) > nw {
-				offset := len(ipPacketPayload) - nw
-				overflow = ipPacketPayload[nw:]
-				t.log.Printf("need to write %d more bytes (outbound)", offset)
-			} else {
+				data = append(overflow, data...)
 				overflow = nil
+			}
+
+			for len(data) > 0 {
+				if len(data) < 20 || data[0]>>4 != 4 {
+					break
+				}
+				totalLen := int(binary.BigEndian.Uint16(data[2:4]))
+				if totalLen < 20 || totalLen > len(data) {
+					break
+				}
+				pkt := data[:totalLen]
+				data = data[totalLen:]
+
+				var raddr *net.UDPAddr
+				if t.server {
+					if pf.Filter(pkt) {
+						continue
+					}
+					ipPkt := ipPacket(pkt)
+					_, dstTunIP := ipPkt.AddressesV4NetIP()
+					if dstTunIP == nil {
+						continue
+					}
+					if dstTunIP.Equal(parsedServerLocalTunIP) {
+						continue
+					}
+					raddrInterface, ok := t.tunnelIPtoClient.Load(dstTunIP.String())
+					if !ok {
+						continue
+					}
+					raddr = raddrInterface.(*net.UDPAddr)
+				} else {
+					if pf.Filter(pkt) {
+						continue
+					}
+					raddr = t.loadServerUDPAddr()
+					if raddr == nil {
+						continue
+					}
+				}
+
+				if _, err := sock.WriteToUDP(pkt, raddr); err != nil {
+					if !isDone(ctx) {
+						t.log.Printf("net write error: %v", err)
+					}
+					overflow = data
+					time.Sleep(time.Second)
+					break
+				}
 			}
 		}
 	}()

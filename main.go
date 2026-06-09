@@ -106,6 +106,15 @@ type TunnelConfig struct {
 	// This field only applies to the client.
 	// The default value is 30.
 	HeartbeatInterval *uint
+
+	// DisableGsoGro disables Generic Segmentation Offload (GSO) and
+	// Generic Receive Offload (GRO) on the TUN device. When enabled
+	// (the default), the kernel may deliver large super-packets that
+	// are transparently segmented/reassembled by the tunnel library.
+	//
+	// Disable this if you encounter compatibility issues with the
+	// TUN device or specific Linux kernel versions.
+	DisableGsoGro bool
 }
 
 func loadConfig(conf string) (tunn tunnel, logger *log.Logger, closer func() error) {
@@ -180,13 +189,14 @@ func loadConfig(conf string) (tunn tunnel, logger *log.Logger, closer func() err
 	}
 
 	tunn = tunnel{
-		server:        serverMode,
-		tunDevName:    config.TunnelDevice,
-		tunLocalAddr:  config.TunnelAddress,
-		tunRemoteAddr: config.TunnelPeerAddress,
-		netAddr:       config.NetworkAddress,
-		beatInterval:  time.Second * time.Duration(*config.HeartbeatInterval),
-		log:           logger,
+		server:          serverMode,
+		tunDevName:      config.TunnelDevice,
+		tunLocalAddr:    config.TunnelAddress,
+		tunRemoteAddr:   config.TunnelPeerAddress,
+		netAddr:         config.NetworkAddress,
+		beatInterval:    time.Second * time.Duration(*config.HeartbeatInterval),
+		disableGsoGro:   config.DisableGsoGro,
+		log:             logger,
 	}
 	return tunn, logger, closer
 }
