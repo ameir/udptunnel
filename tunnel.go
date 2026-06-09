@@ -8,7 +8,6 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
-	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -116,6 +115,8 @@ func (t tunnel) run(ctx context.Context) {
 	}
 	defer lp.Close()
 	sock := lp.(*net.UDPConn)
+	sock.SetReadBuffer(4 << 20)
+	sock.SetWriteBuffer(4 << 20)
 
 	// TODO(dsnet): We should drop root privileges at this point since the
 	// TUN device and UDP socket have been set up. However, there is no good
@@ -125,6 +126,9 @@ func (t tunnel) run(ctx context.Context) {
 	// On the client, start some goroutines to accommodate for the dynamically
 	// changing environment that the client may be in.
 	if !t.server {
+		// Pre-allocate heartbeat message (tunLocalAddr never changes).
+		heartbeatMsg := []byte(pingPrefix + t.tunLocalAddr)
+
 		// This single goroutine handles all periodic client-side tasks:
 		// 1. Resolves the server's DNS address to handle dynamic IP changes.
 		// 2. Sends periodic heartbeats (if configured) to maintain NAT state.
@@ -144,7 +148,7 @@ func (t tunnel) run(ctx context.Context) {
 				}
 				t.updateServerUDPAddr(raddr)
 
-				if _, err := sock.WriteToUDP(fmt.Append(nil, pingPrefix, t.tunLocalAddr), raddr); err != nil && !isDone(ctx) {
+				if _, err := sock.WriteToUDPAddrPort(heartbeatMsg, raddr.AddrPort()); err != nil && !isDone(ctx) {
 					t.log.Printf("client heartbeat send error: %v", err)
 				}
 				t.log.Printf("sent client heartbeat: %v", raddr)
@@ -241,7 +245,7 @@ func (t tunnel) run(ctx context.Context) {
 					}
 				}
 
-				if _, err := sock.WriteToUDP(pkt, raddr); err != nil {
+				if _, err := sock.WriteToUDPAddrPort(pkt, raddr.AddrPort()); err != nil {
 					if !isDone(ctx) {
 						t.log.Printf("net write error: %v", err)
 						time.Sleep(time.Second)
@@ -257,10 +261,10 @@ func (t tunnel) run(ctx context.Context) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		buffer := make([]byte, 1<<16) // Buffer for ReadFromUDP
-		var overflow []byte           // Buffer for overflow
+		buffer := make([]byte, 1<<16)
+		var overflow []byte
 		for {
-			nr, raddr, err := sock.ReadFromUDP(buffer)
+			nr, raddr, err := sock.ReadFromUDPAddrPort(buffer)
 			if err != nil {
 				if isDone(ctx) {
 					return
@@ -271,54 +275,50 @@ func (t tunnel) run(ctx context.Context) {
 			}
 
 			ipPayload := buffer[:nr]
+			raddrStr := raddr.String()
 
 			if t.server {
-
-				ipPkt := ipPacket(ipPayload) // Use ipPacket type from filter.go
+				ipPkt := ipPacket(ipPayload)
 
 				if ipPkt.Version() != 4 {
-
-					// check if heartbeat
-					if strings.HasPrefix(string(ipPayload), pingPrefix) { // Heartbeat from client
+					if strings.HasPrefix(string(ipPayload), pingPrefix) {
 						clientTunIp := strings.TrimPrefix(string(ipPayload), pingPrefix)
 
 						var session *clientSession
-						sessionInterface, _ := t.activeClients.LoadOrStore(raddr.String(), &clientSession{
-							publicAddr: raddr,
+						sessionInterface, _ := t.activeClients.LoadOrStore(raddrStr, &clientSession{
+							publicAddr: net.UDPAddrFromAddrPort(raddr),
 							lastActive: time.Now(),
 						})
 						session = sessionInterface.(*clientSession)
 						session.lastActive = time.Now()
 
-						t.log.Printf("Received heartbeat from client %s (%s)", raddr.String(), session.tunnelIP)
+						t.log.Printf("Received heartbeat from client %s (%s)", raddrStr, session.tunnelIP)
 						if _, ok := t.tunnelIPtoClient.Load(clientTunIp); !ok || session.tunnelIP == "" {
 							session.tunnelIP = clientTunIp
-							t.tunnelIPtoClient.Store(clientTunIp, raddr)
-							t.log.Printf("Updated tunnel IP for %s to %s", raddr.String(), clientTunIp)
+							t.tunnelIPtoClient.Store(clientTunIp, net.UDPAddrFromAddrPort(raddr))
+							t.log.Printf("Updated tunnel IP for %s to %s", raddrStr, clientTunIp)
 						}
-						continue // Processed heartbeat
+						continue
 					} else {
-						t.log.Printf("Received non-IPv4 data packet from %s. Dropping.", raddr.String())
+						t.log.Printf("Received non-IPv4 data packet from %s. Dropping.", raddrStr)
 						continue
 					}
 				}
 
-			} else { // Client mode
+			} else {
 				if len(ipPayload) == 0 {
-					t.log.Printf("Client received heartbeat from server %s", raddr.String())
-					continue // Processed heartbeat
+					t.log.Printf("Client received heartbeat from server %s", raddrStr)
+					continue
 				}
 			}
 
 			if pf.Filter(ipPayload) {
-				// Log which client's packet was filtered if in server mode
-				// Additional logging can be added here if desired.
 				continue
 			}
 
 			if len(overflow) > 0 {
-				t.log.Printf("carrying overflow of %d bytes from previous read", len(overflow))
 				ipPayload = append(overflow, ipPayload...)
+				overflow = nil
 			}
 
 			nw, err := iface.Write(ipPayload)
