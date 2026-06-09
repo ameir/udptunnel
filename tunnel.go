@@ -7,8 +7,10 @@ package main
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"net"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -142,13 +144,10 @@ func (t tunnel) run(ctx context.Context) {
 				}
 				t.updateServerUDPAddr(raddr)
 
-				// If heartbeats are enabled, send one to the latest address.
-				if raddr != nil {
-					if _, err := sock.WriteToUDP(fmt.Append(nil, pingPrefix, t.tunLocalAddr), raddr); err != nil && !isDone(ctx) {
-						t.log.Printf("client heartbeat send error: %v", err)
-					}
-					t.log.Printf("sent client heartbeat: %v", raddr)
+				if _, err := sock.WriteToUDP(fmt.Append(nil, pingPrefix, t.tunLocalAddr), raddr); err != nil && !isDone(ctx) {
+					t.log.Printf("client heartbeat send error: %v", err)
 				}
+				t.log.Printf("sent client heartbeat: %v", raddr)
 			}
 
 			task() // Run once immediately.
@@ -188,7 +187,7 @@ func (t tunnel) run(ctx context.Context) {
 					return
 				}
 				t.log.Printf("tun read error: %v; attempting to continue", err)
-				if err.Error() == "read /dev/net/tun: file already closed" || err.Error() == "read /dev/utun: file already closed" {
+				if errors.Is(err, os.ErrClosed) {
 					t.log.Printf("TUN device appears closed, exiting read goroutine: %v", err)
 					return
 				}
@@ -226,7 +225,8 @@ func (t tunnel) run(ctx context.Context) {
 					if dstTunIP.Equal(parsedServerLocalTunIP) {
 						continue
 					}
-					raddrInterface, ok := t.tunnelIPtoClient.Load(dstTunIP.String())
+					dstKey := dstTunIP.String()
+					raddrInterface, ok := t.tunnelIPtoClient.Load(dstKey)
 					if !ok {
 						continue
 					}
@@ -244,9 +244,9 @@ func (t tunnel) run(ctx context.Context) {
 				if _, err := sock.WriteToUDP(pkt, raddr); err != nil {
 					if !isDone(ctx) {
 						t.log.Printf("net write error: %v", err)
+						time.Sleep(time.Second)
 					}
 					overflow = data
-					time.Sleep(time.Second)
 					break
 				}
 			}

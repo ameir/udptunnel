@@ -210,8 +210,6 @@ func main() {
 	tunn, logger, closer := loadConfig(os.Args[1])
 	defer closer()
 
-	runtime.GOMAXPROCS(20 * runtime.NumCPU())
-
 	// Setup signal handler to initiate shutdown.
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
