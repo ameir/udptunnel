@@ -46,6 +46,7 @@ type tunnel struct {
 }
 
 type clientSession struct {
+	mu         sync.Mutex
 	publicAddr *net.UDPAddr
 	tunnelIP   string // Client's private/tunnel IP, learned from its first data packet
 	lastActive time.Time
@@ -115,8 +116,12 @@ func (t tunnel) run(ctx context.Context) {
 	}
 	defer lp.Close()
 	sock := lp.(*net.UDPConn)
-	sock.SetReadBuffer(4 << 20)
-	sock.SetWriteBuffer(4 << 20)
+	if err := sock.SetReadBuffer(4 << 20); err != nil {
+		t.log.Printf("failed to set read buffer size: %v", err)
+	}
+	if err := sock.SetWriteBuffer(4 << 20); err != nil {
+		t.log.Printf("failed to set write buffer size: %v", err)
+	}
 
 	// TODO(dsnet): We should drop root privileges at this point since the
 	// TUN device and UDP socket have been set up. However, there is no good
@@ -129,16 +134,16 @@ func (t tunnel) run(ctx context.Context) {
 		// Pre-allocate heartbeat message (tunLocalAddr never changes).
 		heartbeatMsg := []byte(pingPrefix + t.tunLocalAddr)
 
+		// Use the configured heartbeat interval, or a 30s default for DNS-only checks.
+		beatInterval := t.beatInterval
+		if beatInterval == 0 {
+			beatInterval = 30 * time.Second
+		}
+
 		// This single goroutine handles all periodic client-side tasks:
 		// 1. Resolves the server's DNS address to handle dynamic IP changes.
 		// 2. Sends periodic heartbeats (if configured) to maintain NAT state.
 		go func() {
-			// Use the configured heartbeat interval, or a 30s default for DNS-only checks.
-			if t.beatInterval == 0 {
-				t.beatInterval = 30 * time.Second
-				t.log.Printf("setting default heartbeat interval: %d", t.beatInterval)
-			}
-
 			// Define the task to be run periodically.
 			task := func() {
 				raddr, err := net.ResolveUDPAddr("udp4", t.netAddr)
@@ -156,7 +161,7 @@ func (t tunnel) run(ctx context.Context) {
 
 			task() // Run once immediately.
 
-			ticker := time.NewTicker(t.beatInterval)
+			ticker := time.NewTicker(beatInterval)
 			defer ticker.Stop()
 			for {
 				select {
@@ -182,7 +187,7 @@ func (t tunnel) run(ctx context.Context) {
 			}
 		}
 
-		buffer := make([]byte, 1<<16)
+		buffer := make([]byte, 1<<18)
 		var overflow []byte
 		for {
 			n, err := iface.Read(buffer)
@@ -218,25 +223,22 @@ func (t tunnel) run(ctx context.Context) {
 
 				var raddr *net.UDPAddr
 				if t.server {
-					if pf.Filter(pkt) {
+					proto := pkt[9]
+					if proto != tcp && proto != udp && proto != icmp {
 						continue
 					}
-					ipPkt := ipPacket(pkt)
-					_, dstTunIP := ipPkt.AddressesV4NetIP()
-					if dstTunIP == nil {
-						continue
-					}
+					dstTunIP := net.IP(pkt[16:20])
 					if dstTunIP.Equal(parsedServerLocalTunIP) {
 						continue
 					}
-					dstKey := dstTunIP.String()
-					raddrInterface, ok := t.tunnelIPtoClient.Load(dstKey)
+					raddrInterface, ok := t.tunnelIPtoClient.Load(dstTunIP.String())
 					if !ok {
 						continue
 					}
 					raddr = raddrInterface.(*net.UDPAddr)
 				} else {
-					if pf.Filter(pkt) {
+					proto := pkt[9]
+					if proto != tcp && proto != udp && proto != icmp {
 						continue
 					}
 					raddr = t.loadServerUDPAddr()
@@ -250,7 +252,8 @@ func (t tunnel) run(ctx context.Context) {
 						t.log.Printf("net write error: %v", err)
 						time.Sleep(time.Second)
 					}
-					overflow = data
+					overflow = make([]byte, len(data))
+					copy(overflow, data)
 					break
 				}
 			}
@@ -261,7 +264,7 @@ func (t tunnel) run(ctx context.Context) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		buffer := make([]byte, 1<<16)
+		buffer := make([]byte, 1<<18)
 		var overflow []byte
 		for {
 			nr, raddr, err := sock.ReadFromUDPAddrPort(buffer)
@@ -275,10 +278,10 @@ func (t tunnel) run(ctx context.Context) {
 			}
 
 			ipPayload := buffer[:nr]
-			raddrStr := raddr.String()
 
 			if t.server {
 				ipPkt := ipPacket(ipPayload)
+				raddrStr := raddr.String()
 
 				if ipPkt.Version() != 4 {
 					if strings.HasPrefix(string(ipPayload), pingPrefix) {
@@ -290,11 +293,21 @@ func (t tunnel) run(ctx context.Context) {
 							lastActive: time.Now(),
 						})
 						session = sessionInterface.(*clientSession)
+
+						session.mu.Lock()
 						session.lastActive = time.Now()
 
-						t.log.Printf("Received heartbeat from client %s (%s)", raddrStr, session.tunnelIP)
+						needUpdate := false
 						if _, ok := t.tunnelIPtoClient.Load(clientTunIp); !ok || session.tunnelIP == "" {
+							needUpdate = true
+							if session.tunnelIP != "" && session.tunnelIP != clientTunIp {
+								t.tunnelIPtoClient.Delete(session.tunnelIP)
+							}
 							session.tunnelIP = clientTunIp
+						}
+						session.mu.Unlock()
+
+						if needUpdate {
 							t.tunnelIPtoClient.Store(clientTunIp, net.UDPAddrFromAddrPort(raddr))
 							t.log.Printf("Updated tunnel IP for %s to %s", raddrStr, clientTunIp)
 						}
@@ -305,11 +318,6 @@ func (t tunnel) run(ctx context.Context) {
 					}
 				}
 
-			} else {
-				if len(ipPayload) == 0 {
-					t.log.Printf("Client received heartbeat from server %s", raddrStr)
-					continue
-				}
 			}
 
 			if pf.Filter(ipPayload) {
@@ -331,7 +339,8 @@ func (t tunnel) run(ctx context.Context) {
 
 			if len(ipPayload) > nw {
 				offset := len(ipPayload) - nw
-				overflow = ipPayload[nw:]
+				overflow = make([]byte, len(ipPayload)-nw)
+				copy(overflow, ipPayload[nw:])
 				t.log.Printf("need to write %d more bytes (inbound)", offset)
 			} else {
 				overflow = nil
@@ -376,20 +385,25 @@ func (t *tunnel) cleanupStaleClients(ctx context.Context, staleTimeout time.Dura
 			now := time.Now()
 			t.activeClients.Range(func(key interface{}, value interface{}) bool {
 				session := value.(*clientSession)
+				session.mu.Lock()
 				if now.Sub(session.lastActive) > staleTimeout {
 					clientAddrStr := key.(string)
-					t.log.Printf("Removing stale client session: %s (Tunnel IP: %s)", clientAddrStr, session.tunnelIP)
+					tunnelIP := session.tunnelIP
+					session.mu.Unlock()
+					t.log.Printf("Removing stale client session: %s (Tunnel IP: %s)", clientAddrStr, tunnelIP)
 					t.activeClients.Delete(key)
 
 					// if a client's public IP changes, don't delete the tunnelIPtoClient mapping
-					if raddrInterface, ok := t.tunnelIPtoClient.Load(session.tunnelIP); ok {
+					if raddrInterface, ok := t.tunnelIPtoClient.Load(tunnelIP); ok {
 						raddr := raddrInterface.(*net.UDPAddr)
 						if clientAddrStr == raddr.String() {
-							t.tunnelIPtoClient.Delete(session.tunnelIP)
+							t.tunnelIPtoClient.Delete(tunnelIP)
 						} else {
-							t.log.Printf("Public IP for tunnel IP %s changed from %s to %s", session.tunnelIP, clientAddrStr, raddr.String())
+							t.log.Printf("Public IP for tunnel IP %s changed from %s to %s", tunnelIP, clientAddrStr, raddr.String())
 						}
 					}
+				} else {
+					session.mu.Unlock()
 				}
 				return true // Continue iteration
 			})

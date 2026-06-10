@@ -42,6 +42,9 @@ func (ip ipPacket) AddressesV4() (src, dst [4]byte) {
 
 // AddressesNetIP returns the source and destination IPv4 addresses as net.IP.
 func (ip ipPacket) AddressesNetIP() (src, dst net.IP) {
+	if len(ip) < 20 || ip.Version() != 4 {
+		return nil, nil
+	}
 	return net.IP(ip[12:16]), net.IP(ip[16:20])
 }
 
