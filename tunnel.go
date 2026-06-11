@@ -129,7 +129,7 @@ func (t tunnel) run(ctx context.Context) {
 	// TODO(dsnet): We should drop root privileges at this point since the
 	// TUN device and UDP socket have been set up. However, there is no good
 	// support for doing so currently: https://golang.org/issue/1435
-	pf := newPortFilter()
+	protocolFilter := newProtocolFilter()
 
 	// On the client, start some goroutines to accommodate for the dynamically
 	// changing environment that the client may be in.
@@ -322,7 +322,7 @@ func (t tunnel) run(ctx context.Context) {
 				}
 			}
 
-			if pf.Filter(ipPayload) {
+			if protocolFilter.Filter(ipPayload) {
 				continue
 			}
 

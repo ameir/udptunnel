@@ -68,13 +68,13 @@ func (ip ipPacket) Body() []byte {
 	return ip[4*n:]
 }
 
-type portFilter struct{}
+type protocolFilter struct{}
 
-func newPortFilter() *portFilter {
-	return &portFilter{}
+func newProtocolFilter() *protocolFilter {
+	return &protocolFilter{}
 }
 
-func (sf *portFilter) Filter(b []byte) (drop bool) {
+func (pf *protocolFilter) Filter(b []byte) (drop bool) {
 	// This logic assumes malformed IP packets are rejected by the Linux kernel.
 	ip := ipPacket(b)
 	if ip.Version() != 4 {
