@@ -47,11 +47,10 @@ import (
 	"io"
 	"log"
 	"net"
-	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"path"
-	"runtime"
+	"runtime/debug"
 	"syscall"
 	"time"
 
@@ -60,6 +59,8 @@ import (
 
 // Version of the udptunnel binary. May be set by linker when building.
 var version string
+var buildTime string
+var gitCommit string
 
 type TunnelConfig struct {
 	// LogFile is where the tunnel daemon directs its output log.
@@ -68,7 +69,7 @@ type TunnelConfig struct {
 
 	// TunnelDevice is the name of the TUN device.
 	//
-	// This field is optional on Linux, and ignored on Darwin.
+	// This field is optional.
 	// The default value is some device name assigned by the operating system.
 	TunnelDevice string
 
@@ -76,18 +77,9 @@ type TunnelConfig struct {
 	// The client and server should have different IP addresses both in the
 	// 255.255.255.0 subnet mask.
 	//
-	// This field is required on both Linux and Darwin.
+	// This field is required.
 	// Recommended values are 10.0.0.1 and 10.0.0.2 for the server and client.
 	TunnelAddress string
-
-	// TunnelPeerAddress is the private IPv4 address for the remote endpoint.
-	// The client and server should have different IP addresses both in the
-	// 255.255.255.0 subnet mask.
-	//
-	// This field is ignored on Linux, and required on Darwin.
-	// On Darwin, the recommended value is 10.0.0.1 or 10.0.0.2,
-	// depending on which value does not conflict with the local TunnelAddress.
-	TunnelPeerAddress string
 
 	// NetworkAddress is the public host and port for UDP traffic.
 	// If the host portion is empty, then the daemon is operating in
@@ -119,6 +111,8 @@ func loadConfig(conf string) (tunn tunnel, logger *log.Logger, closer func() err
 	var logBuf bytes.Buffer
 	logger = log.New(io.MultiWriter(os.Stderr, &logBuf), "", log.Ldate|log.Ltime|log.Lshortfile)
 
+	// Include the binary identity in startup logs so deployments can confirm
+	// exactly which executable and config were used.
 	var hash string
 	if b, _ := os.ReadFile(os.Args[0]); len(b) > 0 {
 		hash = fmt.Sprintf("%x", sha256.Sum256(b))
@@ -139,29 +133,33 @@ func loadConfig(conf string) (tunn tunnel, logger *log.Logger, closer func() err
 	if config.TunnelAddress == "" {
 		logger.Fatal("required TunnelAddress field must be specified")
 	}
-	if config.TunnelPeerAddress == "" && runtime.GOOS == "darwin" {
-		logger.Fatal("required TunnelPeerAddress field must be specified on darwin")
-	}
-	if config.TunnelAddress == config.TunnelPeerAddress {
-		logger.Fatal("TunnelAddress and TunnelPeerAddress must not conflict")
-	}
 	if config.HeartbeatInterval == nil {
 		config.HeartbeatInterval = new(uint)
 		*config.HeartbeatInterval = 30
 	}
-	host, _, _ := net.SplitHostPort(config.NetworkAddress)
+	// A blank host means ListenPacket binds locally as a server; any host means
+	// the client periodically resolves and sends traffic to that endpoint.
+	host, _, err := net.SplitHostPort(config.NetworkAddress)
+	if err != nil {
+		logger.Fatalf("invalid network address: %v", err)
+	}
 	serverMode := host == ""
 
 	// Print the configuration.
+	buildVersion, buildRevision := buildInfo()
 	var b bytes.Buffer
 	enc := json.NewEncoder(&b)
 	enc.SetEscapeHTML(false)
 	enc.SetIndent("", "\t")
-	enc.Encode(struct {
+	if err := enc.Encode(struct {
 		TunnelConfig
-		BinaryVersion string `json:",omitempty"`
-		BinarySHA256  string `json:",omitempty"`
-	}{config, version, hash})
+		BinaryVersion   string `json:",omitempty"`
+		BinarySHA256    string `json:",omitempty"`
+		BinaryBuildTime string
+		BinaryGitCommit string
+	}{config, buildVersion, hash, valueOrUnknown(buildTime), buildRevision}); err != nil {
+		logger.Fatalf("unable to encode loaded config for logging: %v", err)
+	}
 	logger.Printf("loaded config:\n%s", b.String())
 
 	// Setup the log output.
@@ -173,15 +171,14 @@ func loadConfig(conf string) (tunn tunnel, logger *log.Logger, closer func() err
 		if err != nil {
 			logger.Fatalf("error opening log file: %v", err)
 		}
-		f.Write(logBuf.Bytes()) // Write log output prior to this point
+		if _, err := f.Write(logBuf.Bytes()); err != nil { // Write log output prior to this point
+			logger.Fatalf("error writing initial log output: %v", err)
+		}
 		logger.Printf("suppress stderr logging (redirected to %s)", f.Name())
 		logger.SetOutput(f)
 		closer = f.Close
 	}
 
-	if _, _, err := net.SplitHostPort(config.NetworkAddress); err != nil {
-		logger.Fatalf("invalid network address: %v", err)
-	}
 	if net.ParseIP(config.TunnelAddress).To4() == nil {
 		logger.Fatalf("private tunnel address must be valid IPv4 address")
 	}
@@ -190,13 +187,38 @@ func loadConfig(conf string) (tunn tunnel, logger *log.Logger, closer func() err
 		server:        serverMode,
 		tunDevName:    config.TunnelDevice,
 		tunLocalAddr:  config.TunnelAddress,
-		tunRemoteAddr: config.TunnelPeerAddress,
 		netAddr:       config.NetworkAddress,
 		beatInterval:  time.Second * time.Duration(*config.HeartbeatInterval),
 		disableGsoGro: config.DisableGsoGro,
 		log:           logger,
 	}
 	return tunn, logger, closer
+}
+
+func buildInfo() (buildVersion, buildRevision string) {
+	buildVersion = version
+	buildRevision = gitCommit
+	if info, ok := debug.ReadBuildInfo(); ok {
+		if buildVersion == "" && info.Main.Version != "(devel)" {
+			buildVersion = info.Main.Version
+		}
+		if buildRevision == "" {
+			for _, setting := range info.Settings {
+				if setting.Key == "vcs.revision" {
+					buildRevision = setting.Value
+					break
+				}
+			}
+		}
+	}
+	return buildVersion, valueOrUnknown(buildRevision)
+}
+
+func valueOrUnknown(s string) string {
+	if s == "" {
+		return "unknown"
+	}
+	return s
 }
 
 func main() {
@@ -224,10 +246,6 @@ func main() {
 		logger.Printf("%s starting in client mode", path.Base(os.Args[0]))
 	}
 
-	// go func() {
-	// 	log.Println("booting on localhost:8666]")
-	// 	log.Fatal(http.ListenAndServe(":8666", nil))
-	// }()
 	defer logger.Printf("%s shutdown", path.Base(os.Args[0]))
 	tunn.run(ctx)
 }

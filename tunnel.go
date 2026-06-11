@@ -7,11 +7,11 @@ package main
 import (
 	"context"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"net"
 	"os"
 	"os/exec"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -30,15 +30,15 @@ type tunnel struct {
 	server        bool
 	tunDevName    string
 	tunLocalAddr  string
-	tunRemoteAddr string
 	netAddr       string
 	beatInterval  time.Duration
 	disableGsoGro bool
 
 	log logger
 
-	// For client mode: the resolved UDP address of the server.
-	serverUDPAddr atomic.Value // Stores *net.UDPAddr of the server
+	// serverUDPAddr is atomically swapped by the heartbeat/DNS goroutine and
+	// read by the outbound forwarding goroutine in client mode.
+	serverUDPAddr atomic.Value // Stores *net.UDPAddr
 
 	// For server mode:
 	activeClients    *sync.Map // Key: client public UDP Addr (string). Value: *clientSession
@@ -47,8 +47,7 @@ type tunnel struct {
 
 type clientSession struct {
 	mu         sync.Mutex
-	publicAddr *net.UDPAddr
-	tunnelIP   string // Client's private/tunnel IP, learned from its first data packet
+	tunnelIP   string // Client's private/tunnel IP, learned from its heartbeat
 	lastActive time.Time
 }
 
@@ -64,11 +63,12 @@ const pingPrefix = "ping|"
 //
 // The channels testReady and testDrop are only used for testing and may be nil.
 func (t tunnel) run(ctx context.Context) {
-	// Determine the daemon mode from the network address.
 	var wg sync.WaitGroup
 	defer wg.Wait()
 
 	if t.server {
+		// Server mode learns clients from heartbeats and routes outbound TUN
+		// packets by destination tunnel IP.
 		t.activeClients = &sync.Map{}
 		t.tunnelIPtoClient = &sync.Map{}
 		go t.cleanupStaleClients(ctx, serverClientStaleTimeout)
@@ -83,36 +83,29 @@ func (t tunnel) run(ctx context.Context) {
 	t.log.Printf("created tun device: %v", iface.Name())
 	defer iface.Close()
 
-	// Setup IP properties.
-	switch runtime.GOOS {
-	case "linux":
-		if err := exec.Command("ip", "link", "set", "dev", iface.Name(), "mtu", "1420").Run(); err != nil {
-			t.log.Fatalf("ip link error: %v", err)
-		}
-		if err := exec.Command("ip", "addr", "add", t.tunLocalAddr+"/24", "dev", iface.Name()).Run(); err != nil {
-			t.log.Fatalf("ip addr error: %v", err)
-		}
-		if err := exec.Command("ip", "link", "set", "dev", iface.Name(), "up").Run(); err != nil {
-			t.log.Fatalf("ip link error: %v", err)
-		}
-	case "darwin":
-		if err := exec.Command("ifconfig", iface.Name(), "mtu", "1300", t.tunLocalAddr, t.tunRemoteAddr, "up").Run(); err != nil {
-			t.log.Fatalf("ifconfig error: %v", err)
-		}
-	default:
-		t.log.Fatalf("no tun support for: %v", runtime.GOOS)
+	// Setup Linux IP properties. The MTU leaves room for the outer UDP/IP
+	// headers so tunneled packets usually avoid fragmentation.
+	if err := exec.Command("ip", "link", "set", "dev", iface.Name(), "mtu", "1420").Run(); err != nil {
+		t.log.Fatalf("ip link error: %v", err)
+	}
+	if err := exec.Command("ip", "addr", "add", t.tunLocalAddr+"/24", "dev", iface.Name()).Run(); err != nil {
+		t.log.Fatalf("ip addr error: %v", err)
+	}
+	if err := exec.Command("ip", "link", "set", "dev", iface.Name(), "up").Run(); err != nil {
+		t.log.Fatalf("ip link error: %v", err)
 	}
 
 	// Create a new UDP socket.
 	_, port, _ := net.SplitHostPort(t.netAddr)
 	if !t.server {
+		// Clients should not require the same local port as the server; the
+		// server learns the client's public address from heartbeats.
 		port = "0"
 	}
 	laddr, err := net.ResolveUDPAddr("udp4", net.JoinHostPort("", port))
 	if err != nil {
 		t.log.Fatalf("error resolving address: %v", err)
 	}
-	//sock, err := net.ListenUDP("udp4", laddr)
 	lp, err := reuseport.ListenPacket("udp4", laddr.String())
 	if err != nil {
 		t.log.Fatalf("error listening on socket: %v", err)
@@ -125,6 +118,7 @@ func (t tunnel) run(ctx context.Context) {
 	if err := sock.SetWriteBuffer(4 << 20); err != nil {
 		t.log.Printf("failed to set write buffer size: %v", err)
 	}
+	udpSender := newUDPBatchSender(sock)
 
 	// TODO(dsnet): We should drop root privileges at this point since the
 	// TUN device and UDP socket have been set up. However, there is no good
@@ -137,7 +131,8 @@ func (t tunnel) run(ctx context.Context) {
 		// Pre-allocate heartbeat message (tunLocalAddr never changes).
 		heartbeatMsg := []byte(pingPrefix + t.tunLocalAddr)
 
-		// Use the configured heartbeat interval, or a 30s default for DNS-only checks.
+		// Keep this goroutine separate from forwarding so DNS changes and NAT
+		// refreshes happen even when no tunnel payload is flowing.
 		beatInterval := t.beatInterval
 		if beatInterval == 0 {
 			beatInterval = 30 * time.Second
@@ -147,7 +142,6 @@ func (t tunnel) run(ctx context.Context) {
 		// 1. Resolves the server's DNS address to handle dynamic IP changes.
 		// 2. Sends periodic heartbeats (if configured) to maintain NAT state.
 		go func() {
-			// Define the task to be run periodically.
 			task := func() {
 				raddr, err := net.ResolveUDPAddr("udp4", t.netAddr)
 				if err != nil {
@@ -192,6 +186,17 @@ func (t tunnel) run(ctx context.Context) {
 
 		buffer := make([]byte, 1<<18)
 		var overflow []byte
+		batch := make([]udpPacket, 0, maxUDPSendBatch)
+
+		// Flush after each TUN read; WriteBatch chunks internally, so this
+		// reduces socket syscalls without waiting to fill a batch.
+		flushBatch := func() (int, error) {
+			if len(batch) == 0 {
+				return 0, nil
+			}
+			return udpSender.WriteBatch(batch)
+		}
+
 		for {
 			n, err := iface.Read(buffer)
 			if err != nil {
@@ -209,16 +214,33 @@ func (t tunnel) run(ctx context.Context) {
 
 			data := buffer[:n]
 			if len(overflow) > 0 {
+				// The GSO/GRO-aware TUN library may return multiple IP packets in
+				// one read. Keep any incomplete tail and prepend it to the next read.
 				data = append(overflow, data...)
 				overflow = nil
 			}
 
 			for len(data) > 0 {
-				if len(data) < 20 || data[0]>>4 != 4 {
+				if len(data) < 20 {
+					// TUN reads are packet-oriented; a tiny tail after parsing one or
+					// more complete IPv4 packets is not useful to retry and can be
+					// safely ignored.
+					t.log.Printf("ignoring short outbound packet tail: remaining=%d data=%s", len(data), hex.EncodeToString(data))
+					break
+				}
+				if data[0]>>4 != 4 {
+					t.log.Printf("dropping non-IPv4 outbound packet data: remaining=%d version=%d", len(data), data[0]>>4)
 					break
 				}
 				totalLen := int(binary.BigEndian.Uint16(data[2:4]))
-				if totalLen < 20 || totalLen > len(data) {
+				if totalLen < 20 {
+					t.log.Printf("dropping malformed outbound IPv4 packet: totalLen=%d remaining=%d", totalLen, len(data))
+					break
+				}
+				if totalLen > len(data) {
+					t.log.Printf("buffering incomplete outbound IPv4 packet: totalLen=%d remaining=%d", totalLen, len(data))
+					// Copy because data points at the reusable TUN read buffer.
+					overflow = append(overflow[:0], data...)
 					break
 				}
 				pkt := data[:totalLen]
@@ -250,16 +272,25 @@ func (t tunnel) run(ctx context.Context) {
 					}
 				}
 
-				if _, err := sock.WriteToUDPAddrPort(pkt, raddr.AddrPort()); err != nil {
-					if !isDone(ctx) {
-						t.log.Printf("net write error: %v", err)
-						time.Sleep(time.Second)
-					}
-					overflow = make([]byte, len(data))
-					copy(overflow, data)
-					break
-				}
+				batch = append(batch, udpPacket{data: pkt, addr: raddr})
 			}
+
+			sent, err := flushBatch()
+			if err != nil {
+				if !isDone(ctx) {
+					t.log.Printf("net write error: %v", err)
+					time.Sleep(time.Second)
+				}
+				// WriteBatch should never report more sends than were requested,
+				// but clamp defensively so the retry slice below cannot panic.
+				if sent > len(batch) {
+					sent = len(batch)
+				}
+				// Preserve unsent batched packets as raw bytes before the next TUN
+				// read reuses buffer.
+				overflow = copyPendingPackets(batch[sent:], data)
+			}
+			batch = batch[:0]
 		}
 	}()
 
@@ -284,15 +315,17 @@ func (t tunnel) run(ctx context.Context) {
 
 			if t.server {
 				ipPkt := ipPacket(ipPayload)
-				raddrStr := raddr.String()
 
 				if ipPkt.Version() != 4 {
+					raddrStr := raddr.String()
+
+					// Heartbeats are deliberately non-IP control messages carried on
+					// the same UDP socket as tunneled packets.
 					if strings.HasPrefix(string(ipPayload), pingPrefix) {
 						clientTunIp := strings.TrimPrefix(string(ipPayload), pingPrefix)
 
 						var session *clientSession
 						sessionInterface, _ := t.activeClients.LoadOrStore(raddrStr, &clientSession{
-							publicAddr: net.UDPAddrFromAddrPort(raddr),
 							lastActive: time.Now(),
 						})
 						session = sessionInterface.(*clientSession)
@@ -303,6 +336,8 @@ func (t tunnel) run(ctx context.Context) {
 						needUpdate := false
 						if _, ok := t.tunnelIPtoClient.Load(clientTunIp); !ok || session.tunnelIP == "" {
 							needUpdate = true
+							// A client may move between public addresses; keep only the
+							// latest tunnel-IP mapping for this session.
 							if session.tunnelIP != "" && session.tunnelIP != clientTunIp {
 								t.tunnelIPtoClient.Delete(session.tunnelIP)
 							}
@@ -323,10 +358,13 @@ func (t tunnel) run(ctx context.Context) {
 			}
 
 			if protocolFilter.Filter(ipPayload) {
+				t.log.Printf("dropping inbound packet rejected by protocol filter: bytes=%d protocol=%d", len(ipPayload), ipPacket(ipPayload).Protocol())
 				continue
 			}
 
 			if len(overflow) > 0 {
+				// Retry an incomplete TUN write before appending the newest UDP
+				// payload.
 				ipPayload = append(overflow, ipPayload...)
 				overflow = nil
 			}
@@ -395,7 +433,8 @@ func (t *tunnel) cleanupStaleClients(ctx context.Context, staleTimeout time.Dura
 					t.log.Printf("Removing stale client session: %s (Tunnel IP: %s)", clientAddrStr, tunnelIP)
 					t.activeClients.Delete(key)
 
-					// if a client's public IP changes, don't delete the tunnelIPtoClient mapping
+					// If a heartbeat already moved this tunnel IP to a new public
+					// address, keep the newer mapping.
 					if raddrInterface, ok := t.tunnelIPtoClient.Load(tunnelIP); ok {
 						raddr := raddrInterface.(*net.UDPAddr)
 						if clientAddrStr == raddr.String() {
