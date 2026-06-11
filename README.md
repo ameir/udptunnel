@@ -12,10 +12,8 @@ frequently, but happens to pass UDP traffic reliably.
 TUN traffic is sent ad-verbatim between the two endpoints via unencrypted
 UDP packets. Thus, this should only be used if a more secure protocol
 (like SSH; see [github.com/dsnet/sshtunnel](https://github.com/dsnet/sshtunnel))
-is running on top of this VPN. In order to prevent attackers from connecting to
-other locally binded sockets on the endpoints, a simple port filter is built-in
-to restrict IP traffic to only the specified ports. Users of udptunnel should
-also setup iptable rules as a secondary measure to restrict malicious traffic.
+is running on top of this VPN. Users of udptunnel should also setup firewall
+rules as a secondary measure to restrict malicious traffic.
 
 This only supports Linux.
 
@@ -30,8 +28,7 @@ Create a server configuration file:
 ```javascript
 {
 	"TunnelAddress": "10.0.0.1",
-	"NetworkAddress": ":8000",
-	"AllowedPorts": [22],
+	"NetworkAddress": ":8000"
 }
 ```
 
@@ -43,8 +40,7 @@ Create a client configuration file:
 ```javascript
 {
 	"TunnelAddress": "10.0.0.2",
-	"NetworkAddress": "server.example.com:8000",
-	"AllowedPorts": [22],
+	"NetworkAddress": "server.example.com:8000"
 }
 ```
 

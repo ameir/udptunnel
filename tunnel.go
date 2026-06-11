@@ -27,13 +27,13 @@ type logger interface {
 }
 
 type tunnel struct {
-	server          bool
-	tunDevName      string
-	tunLocalAddr    string
-	tunRemoteAddr   string
-	netAddr         string
-	beatInterval    time.Duration
-	disableGsoGro   bool
+	server        bool
+	tunDevName    string
+	tunLocalAddr  string
+	tunRemoteAddr string
+	netAddr       string
+	beatInterval  time.Duration
+	disableGsoGro bool
 
 	log logger
 
@@ -105,6 +105,9 @@ func (t tunnel) run(ctx context.Context) {
 
 	// Create a new UDP socket.
 	_, port, _ := net.SplitHostPort(t.netAddr)
+	if !t.server {
+		port = "0"
+	}
 	laddr, err := net.ResolveUDPAddr("udp4", net.JoinHostPort("", port))
 	if err != nil {
 		t.log.Fatalf("error resolving address: %v", err)
@@ -317,7 +320,6 @@ func (t tunnel) run(ctx context.Context) {
 						continue
 					}
 				}
-
 			}
 
 			if pf.Filter(ipPayload) {

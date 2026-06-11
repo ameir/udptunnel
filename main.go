@@ -21,11 +21,11 @@
 //
 // Example server config:
 //
-//	{"TunnelAddress": "10.0.0.1", "NetworkAddress": ":8000", "AllowedPorts": [22]}
+//	{"TunnelAddress": "10.0.0.1", "NetworkAddress": ":8000"}
 //
 // Example client config:
 //
-//	{"TunnelAddress": "10.0.0.2", "NetworkAddress": "example.com:8000", "AllowedPorts": [22]}
+//	{"TunnelAddress": "10.0.0.2", "NetworkAddress": "example.com:8000"}
 //
 // See the TunnelConfig struct for more details.
 //
@@ -33,11 +33,9 @@
 //
 // TUN traffic is sent ad-verbatim between the two endpoints via unencrypted
 // UDP traffic. The intended use case is to run a secure protocol (like SSH;
-// see github.com/dsnet/sshtunnel) on top of this simple VPN. In order to
-// prevent attackers from connecting to other locally binded sockets on the
-// endpoints, a simple port filter is built-in to restrict IP traffic to only
-// the specified ports. Users of udptunnel should also setup iptable rules as
-// a secondary measure to restrict malicious traffic.
+// see github.com/dsnet/sshtunnel) on top of this simple VPN. Users of
+// udptunnel should also setup firewall rules as a secondary measure to
+// restrict malicious traffic.
 package main
 
 import (
@@ -189,14 +187,14 @@ func loadConfig(conf string) (tunn tunnel, logger *log.Logger, closer func() err
 	}
 
 	tunn = tunnel{
-		server:          serverMode,
-		tunDevName:      config.TunnelDevice,
-		tunLocalAddr:    config.TunnelAddress,
-		tunRemoteAddr:   config.TunnelPeerAddress,
-		netAddr:         config.NetworkAddress,
-		beatInterval:    time.Second * time.Duration(*config.HeartbeatInterval),
-		disableGsoGro:   config.DisableGsoGro,
-		log:             logger,
+		server:        serverMode,
+		tunDevName:    config.TunnelDevice,
+		tunLocalAddr:  config.TunnelAddress,
+		tunRemoteAddr: config.TunnelPeerAddress,
+		netAddr:       config.NetworkAddress,
+		beatInterval:  time.Second * time.Duration(*config.HeartbeatInterval),
+		disableGsoGro: config.DisableGsoGro,
+		log:           logger,
 	}
 	return tunn, logger, closer
 }
