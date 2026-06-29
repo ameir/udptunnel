@@ -88,10 +88,10 @@ type TunnelConfig struct {
 	// specified host to communicate with the server (e.g., "example.com:8000").
 	NetworkAddress string
 
-	// HeartbeatInterval is the amount of time in seconds without any
-	// outbound traffic to wait before the tunnel client will send a heartbeat
-	// message to the server. In the event that the client's address changed,
-	// this informs the server of the new client address.
+	// HeartbeatInterval is the interval in seconds at which the tunnel client
+	// sends a heartbeat message to the server. This keeps the client's NAT state
+	// open and, if the client's public address changed, informs the server of
+	// the new client address.
 	//
 	// This field only applies to the client.
 	// The default value is 30.

@@ -4,8 +4,6 @@
 
 package main
 
-import "net"
-
 const (
 	icmp = 1
 	tcp  = 6
@@ -13,10 +11,6 @@ const (
 )
 
 type ipPacket []byte
-
-func (ip ipPacket) Length() int {
-	return len(ip)
-}
 
 func (ip ipPacket) Version() int {
 	if len(ip) > 0 {
@@ -30,42 +24,6 @@ func (ip ipPacket) Protocol() int {
 		return int(ip[9])
 	}
 	return 0
-}
-
-func (ip ipPacket) AddressesV4() (src, dst [4]byte) {
-	if len(ip) >= 20 && ip.Version() == 4 {
-		copy(src[:], ip[12:16])
-		copy(dst[:], ip[16:20])
-	}
-	return
-}
-
-// AddressesNetIP returns the source and destination IPv4 addresses as net.IP.
-func (ip ipPacket) AddressesNetIP() (src, dst net.IP) {
-	if len(ip) < 20 || ip.Version() != 4 {
-		return nil, nil
-	}
-	return net.IP(ip[12:16]), net.IP(ip[16:20])
-}
-
-// AddressesV4NetIP returns the source and destination IPv4 addresses as net.IP.
-// It returns nil IPs if the packet is not IPv4 or is too short.
-func (ip ipPacket) AddressesV4NetIP() (src, dst net.IP) {
-	if ip.Length() < 20 || ip.Version() != 4 { // Check length and version
-		return nil, nil
-	}
-	return ip.AddressesNetIP()
-}
-
-func (ip ipPacket) Body() []byte {
-	if ip.Version() != 4 {
-		return nil // No support for IPv6
-	}
-	n := int(ip[0] & 0x0f)
-	if n < 5 || n > 15 || len(ip) < 4*n {
-		return nil
-	}
-	return ip[4*n:]
 }
 
 type protocolFilter struct{}

@@ -71,7 +71,15 @@ func (t tunnel) run(ctx context.Context) {
 		// packets by destination tunnel IP.
 		t.activeClients = &sync.Map{}
 		t.tunnelIPtoClient = &sync.Map{}
-		go t.cleanupStaleClients(ctx, serverClientStaleTimeout)
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			t.cleanupStaleClients(ctx, serverClientStaleTimeout)
+		}()
+		go func() {
+			defer wg.Done()
+			t.logConnectedClients(ctx, 10*time.Minute)
+		}()
 	}
 
 	// Create a new tunnel device (requires root privileges).
@@ -119,6 +127,7 @@ func (t tunnel) run(ctx context.Context) {
 		t.log.Printf("failed to set write buffer size: %v", err)
 	}
 	udpSender := newUDPBatchSender(sock)
+	udpReceiver := newUDPBatchReceiver(sock)
 
 	// TODO(dsnet): We should drop root privileges at this point since the
 	// TUN device and UDP socket have been set up. However, there is no good
@@ -136,6 +145,15 @@ func (t tunnel) run(ctx context.Context) {
 		beatInterval := t.beatInterval
 		if beatInterval == 0 {
 			beatInterval = 30 * time.Second
+		}
+
+		// Resolve the server address once synchronously before the outbound
+		// forwarder starts. Otherwise the very first packets would be dropped
+		// because serverUDPAddr is still nil until the heartbeat goroutine runs.
+		if raddr, err := net.ResolveUDPAddr("udp4", t.netAddr); err != nil {
+			t.log.Printf("error resolving server address: %v", err)
+		} else {
+			t.updateServerUDPAddr(raddr)
 		}
 
 		// This single goroutine handles all periodic client-side tasks:
@@ -298,37 +316,40 @@ func (t tunnel) run(ctx context.Context) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		buffer := make([]byte, 1<<18)
-		var overflow []byte
-		for {
-			nr, raddr, err := sock.ReadFromUDPAddrPort(buffer)
-			if err != nil {
-				if isDone(ctx) {
-					return
-				}
-				t.log.Printf("net read error: %v", err)
-				time.Sleep(time.Second)
-				continue
-			}
 
-			ipPayload := buffer[:nr]
-
+		// processDatagram applies the per-datagram inbound logic (heartbeat
+		// handling, client registration check, protocol filter) and returns the
+		// payload to forward to the TUN device, or nil if the datagram was
+		// consumed or dropped. The returned slice is only valid for the duration
+		// of this call (it aliases the read buffer), so callers must copy it if
+		// they need to retain it.
+		processDatagram := func(payload []byte, raddr *net.UDPAddr) []byte {
 			if t.server {
-				ipPkt := ipPacket(ipPayload)
+				ipPkt := ipPacket(payload)
 
 				if ipPkt.Version() != 4 {
 					raddrStr := raddr.String()
 
 					// Heartbeats are deliberately non-IP control messages carried on
 					// the same UDP socket as tunneled packets.
-					if strings.HasPrefix(string(ipPayload), pingPrefix) {
-						clientTunIp := strings.TrimPrefix(string(ipPayload), pingPrefix)
+					if strings.HasPrefix(string(payload), pingPrefix) {
+						clientTunIp := strings.TrimPrefix(string(payload), pingPrefix)
+
+						// Reject malformed heartbeats so garbage can't pollute the
+						// tunnel-IP mapping or the logs.
+						if net.ParseIP(clientTunIp) == nil {
+							t.log.Printf("ignoring heartbeat with invalid tunnel IP %q from %s", clientTunIp, raddrStr)
+							return nil
+						}
 
 						var session *clientSession
-						sessionInterface, _ := t.activeClients.LoadOrStore(raddrStr, &clientSession{
+						sessionInterface, loaded := t.activeClients.LoadOrStore(raddrStr, &clientSession{
 							lastActive: time.Now(),
 						})
 						session = sessionInterface.(*clientSession)
+						if !loaded {
+							t.log.Printf("new client connected: public=%s", raddrStr)
+						}
 
 						session.mu.Lock()
 						session.lastActive = time.Now()
@@ -346,44 +367,102 @@ func (t tunnel) run(ctx context.Context) {
 						session.mu.Unlock()
 
 						if needUpdate {
-							t.tunnelIPtoClient.Store(clientTunIp, net.UDPAddrFromAddrPort(raddr))
+							// Store the source address as-is; the outbound path
+							// type-asserts it back to *net.UDPAddr.
+							t.tunnelIPtoClient.Store(clientTunIp, raddr)
 							t.log.Printf("Updated tunnel IP for %s to %s", raddrStr, clientTunIp)
 						}
-						continue
-					} else {
-						t.log.Printf("Received non-IPv4 data packet from %s. Dropping.", raddrStr)
-						continue
+						return nil
 					}
+
+					t.log.Printf("Received non-IPv4 data packet from %s. Dropping.", raddrStr)
+					return nil
 				}
 			}
 
-			if protocolFilter.Filter(ipPayload) {
-				t.log.Printf("dropping inbound packet rejected by protocol filter: bytes=%d protocol=%d", len(ipPayload), ipPacket(ipPayload).Protocol())
-				continue
+			// In server mode, only accept tunneled data from a client that has
+			// registered itself with a heartbeat. This prevents arbitrary hosts
+			// from injecting packets into the tunnel network.
+			if t.server {
+				if _, ok := t.activeClients.Load(raddr.String()); !ok {
+					t.log.Printf("dropping inbound data from unregistered client: %s", raddr)
+					return nil
+				}
 			}
 
-			if len(overflow) > 0 {
-				// Retry an incomplete TUN write before appending the newest UDP
-				// payload.
-				ipPayload = append(overflow, ipPayload...)
-				overflow = nil
+			if protocolFilter.Filter(payload) {
+				t.log.Printf("dropping inbound packet rejected by protocol filter: bytes=%d protocol=%d", len(payload), ipPacket(payload).Protocol())
+				return nil
 			}
 
-			nw, err := iface.Write(ipPayload)
+			return payload
+		}
+
+		// groBuf accumulates the payloads that survive processDatagram so they
+		// can be handed to a single iface.Write. Concatenating multiple packets
+		// in one write is what lets the TUN library's GRO coalesce same-flow
+		// packets; with one packet per write it can never merge anything.
+		var groBuf []byte
+		for {
+			msgs, err := udpReceiver.readBatch()
+
+			// With a partial batch ReadBatch may return some datagrams alongside
+			// an error (e.g. a transient error partway through); process whatever
+			// arrived before deciding how to handle the error.
+			groBuf = groBuf[:0]
+			for i := range msgs {
+				msg := &msgs[i]
+				if msg.N <= 0 {
+					continue
+				}
+				raddr, ok := msg.Addr.(*net.UDPAddr)
+				if !ok || raddr == nil {
+					continue
+				}
+				payload := msg.Buffers[0][:msg.N]
+				if out := processDatagram(payload, raddr); out != nil {
+					groBuf = append(groBuf, out...)
+				}
+			}
+
+			// Deliver any accumulated packets to the TUN device. The library's
+			// virtioMakeGro coalesces same-flow packets within this single write;
+			// errors here don't corrupt later packets since each Write is
+			// independent.
+			if len(groBuf) > 0 {
+				nw, werr := iface.Write(groBuf)
+				if werr != nil {
+					if isDone(ctx) {
+						return
+					}
+					t.log.Printf("tun write error: %v", werr)
+				}
+				if nw < len(groBuf) && werr == nil {
+					// The library may accept a prefix of the concatenated packets
+					// and report the rest as an incomplete trailing packet. The
+					// consumed prefix was written; drop only the trailing remnant.
+					t.log.Printf("tun write accepted %d of %d inbound bytes; dropping trailing remnant", nw, len(groBuf))
+				}
+			}
+
 			if err != nil {
 				if isDone(ctx) {
 					return
 				}
-				t.log.Printf("tun write error: %v", err)
+				if len(msgs) == 0 {
+					// Nothing was read; the error applies to the whole batch.
+					t.log.Printf("net read error: %v", err)
+					time.Sleep(time.Second)
+				} else {
+					// Some datagrams were read and processed; log but don't sleep,
+					// since data is still flowing.
+					t.log.Printf("net read error (partial batch): %v", err)
+				}
+				continue
 			}
-
-			if len(ipPayload) > nw {
-				offset := len(ipPayload) - nw
-				overflow = make([]byte, len(ipPayload)-nw)
-				copy(overflow, ipPayload[nw:])
-				t.log.Printf("need to write %d more bytes (inbound)", offset)
-			} else {
-				overflow = nil
+			if len(msgs) == 0 {
+				// ReadBatch returned 0 with no error. Avoid spinning.
+				time.Sleep(time.Second)
 			}
 		}
 	}()
@@ -447,6 +526,31 @@ func (t *tunnel) cleanupStaleClients(ctx context.Context, staleTimeout time.Dura
 					session.mu.Unlock()
 				}
 				return true // Continue iteration
+			})
+		}
+	}
+}
+
+func (t *tunnel) logConnectedClients(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			t.log.Printf("--- Connected clients ---")
+			t.activeClients.Range(func(key, value interface{}) bool {
+				session := value.(*clientSession)
+				session.mu.Lock()
+				tunIP := session.tunnelIP
+				session.mu.Unlock()
+				if tunIP != "" {
+					t.log.Printf("  public=%s  tunnel=%s", key.(string), tunIP)
+				} else {
+					t.log.Printf("  public=%s  tunnel=(not yet assigned)", key.(string))
+				}
+				return true
 			})
 		}
 	}

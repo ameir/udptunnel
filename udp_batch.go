@@ -12,6 +12,7 @@ import (
 )
 
 const maxUDPSendBatch = 32
+const maxUDPRecvBatch = 32
 
 // udpPacket keeps the destination alongside the payload so one batch can
 // contain packets for different clients in server mode.
@@ -83,4 +84,40 @@ func (s *udpBatchSender) WriteBatch(packets []udpPacket) (int, error) {
 		}
 	}
 	return total, nil
+}
+
+type udpBatchReceiver struct {
+	conn *ipv4.PacketConn
+	// msgs is reused across reads. Each entry's Buffers points at a stable
+	// backing buffer in bufs so ReadBatch can refill them in place.
+	msgs []ipv4.Message
+	bufs [][]byte
+}
+
+func newUDPBatchReceiver(conn *net.UDPConn) *udpBatchReceiver {
+	r := &udpBatchReceiver{
+		conn: ipv4.NewPacketConn(conn),
+		msgs: make([]ipv4.Message, maxUDPRecvBatch),
+		bufs: make([][]byte, maxUDPRecvBatch),
+	}
+	for i := range r.bufs {
+		r.bufs[i] = make([]byte, 1<<18)
+		// Pre-arm Buffers once; readBatch reuses the same backing slices.
+		r.msgs[i].Buffers = [][]byte{r.bufs[i]}
+	}
+	return r
+}
+
+// readBatch drains up to maxUDPRecvBatch datagrams in one syscall
+// (recvmmsg on Linux). It returns the slice of received messages (a sub-slice
+// of the receiver's reusable msgs array) and the error from ReadBatch, if any.
+//
+// The returned messages are only valid until the next readBatch call, which
+// reuses their backing buffers. Callers must copy any bytes they need to retain.
+//
+// ReadBatch with flags=0 is opportunistic: it returns whatever datagrams are
+// currently queued without waiting to fill the batch, so latency is unaffected.
+func (r *udpBatchReceiver) readBatch() ([]ipv4.Message, error) {
+	n, err := r.conn.ReadBatch(r.msgs, 0)
+	return r.msgs[:n], err
 }
