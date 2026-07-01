@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"net"
+	"net/netip"
 	"os"
 	"os/exec"
 	"strings"
@@ -41,8 +42,9 @@ type tunnel struct {
 	serverUDPAddr atomic.Value // Stores *net.UDPAddr
 
 	// For server mode:
-	activeClients    *sync.Map // Key: client public UDP Addr (string). Value: *clientSession
-	tunnelIPtoClient *sync.Map // Key: client tunnel IP (string). Value: *net.UDPAddr (client public UDP Addr)
+	activeClientsMu sync.RWMutex
+	activeClients   map[netip.AddrPort]*clientSession
+	tunnelIPtoClient *sync.Map // Key: client tunnel IP ([4]byte). Value: *net.UDPAddr (client public UDP Addr)
 }
 
 type clientSession struct {
@@ -62,14 +64,14 @@ const pingPrefix = "ping|"
 // it is fully shutdown.
 //
 // The channels testReady and testDrop are only used for testing and may be nil.
-func (t tunnel) run(ctx context.Context) {
+func (t *tunnel) run(ctx context.Context) {
 	var wg sync.WaitGroup
 	defer wg.Wait()
 
 	if t.server {
 		// Server mode learns clients from heartbeats and routes outbound TUN
 		// packets by destination tunnel IP.
-		t.activeClients = &sync.Map{}
+		t.activeClients = make(map[netip.AddrPort]*clientSession)
 		t.tunnelIPtoClient = &sync.Map{}
 		wg.Add(2)
 		go func() {
@@ -159,22 +161,48 @@ func (t tunnel) run(ctx context.Context) {
 		// This single goroutine handles all periodic client-side tasks:
 		// 1. Resolves the server's DNS address to handle dynamic IP changes.
 		// 2. Sends periodic heartbeats (if configured) to maintain NAT state.
+		// DNS is cached and refreshed every 5 minutes. On send failure, the
+		// address is re-resolved immediately to handle IP changes.
 		go func() {
-			task := func() {
+			const dnsCacheInterval = 5 * time.Minute
+
+			// Cache the resolved address and when it was last resolved.
+			var cachedAddr *net.UDPAddr
+			var lastResolve time.Time
+
+			resolve := func() error {
 				raddr, err := net.ResolveUDPAddr("udp4", t.netAddr)
 				if err != nil {
 					t.log.Printf("error resolving server address: %v", err)
-					return
+					return err
 				}
+				cachedAddr = raddr
+				lastResolve = time.Now()
 				t.updateServerUDPAddr(raddr)
-
-				if _, err := sock.WriteToUDPAddrPort(heartbeatMsg, raddr.AddrPort()); err != nil && !isDone(ctx) {
-					t.log.Printf("client heartbeat send error: %v", err)
-				}
-				t.log.Printf("sent client heartbeat: %v", raddr)
+				return nil
 			}
 
-			task() // Run once immediately.
+			sendHeartbeat := func() error {
+				// Re-resolve if cache is stale.
+				if cachedAddr == nil || time.Since(lastResolve) > dnsCacheInterval {
+					if err := resolve(); err != nil {
+						return err
+					}
+				}
+				if _, err := sock.WriteToUDPAddrPort(heartbeatMsg, cachedAddr.AddrPort()); err != nil {
+					return err
+				}
+				t.log.Printf("sent client heartbeat: %v", cachedAddr)
+				return nil
+			}
+
+			// Run once immediately.
+			if err := sendHeartbeat(); err != nil {
+				// Try a fresh resolve + retry once on initial failure.
+				if err := resolve(); err == nil {
+					_ = sendHeartbeat()
+				}
+			}
 
 			ticker := time.NewTicker(beatInterval)
 			defer ticker.Stop()
@@ -183,7 +211,11 @@ func (t tunnel) run(ctx context.Context) {
 				case <-ctx.Done():
 					return
 				case <-ticker.C:
-					task()
+					if err := sendHeartbeat(); err != nil && !isDone(ctx) {
+						t.log.Printf("client heartbeat send error: %v", err)
+						// Force re-resolve on next attempt.
+						cachedAddr = nil
+					}
 				}
 			}
 		}()
@@ -274,7 +306,7 @@ func (t tunnel) run(ctx context.Context) {
 					if dstTunIP.Equal(parsedServerLocalTunIP) {
 						continue
 					}
-					raddrInterface, ok := t.tunnelIPtoClient.Load(dstTunIP.String())
+					raddrInterface, ok := t.tunnelIPtoClient.Load(ip4Key(dstTunIP))
 					if !ok {
 						continue
 					}
@@ -335,18 +367,24 @@ func (t tunnel) run(ctx context.Context) {
 					if strings.HasPrefix(string(payload), pingPrefix) {
 						clientTunIp := strings.TrimPrefix(string(payload), pingPrefix)
 
+						parsedTunIP := net.ParseIP(clientTunIp)
 						// Reject malformed heartbeats so garbage can't pollute the
 						// tunnel-IP mapping or the logs.
-						if net.ParseIP(clientTunIp) == nil {
+						if parsedTunIP == nil {
 							t.log.Printf("ignoring heartbeat with invalid tunnel IP %q from %s", clientTunIp, raddrStr)
 							return nil
 						}
+						tunIPKey := ip4Key(parsedTunIP)
 
 						var session *clientSession
-						sessionInterface, loaded := t.activeClients.LoadOrStore(raddrStr, &clientSession{
-							lastActive: time.Now(),
-						})
-						session = sessionInterface.(*clientSession)
+						clientKey := raddr.AddrPort()
+						t.activeClientsMu.Lock()
+						session, loaded := t.activeClients[clientKey]
+						if !loaded {
+							session = &clientSession{lastActive: time.Now()}
+							t.activeClients[clientKey] = session
+						}
+						t.activeClientsMu.Unlock()
 						if !loaded {
 							t.log.Printf("new client connected: public=%s", raddrStr)
 						}
@@ -355,12 +393,12 @@ func (t tunnel) run(ctx context.Context) {
 						session.lastActive = time.Now()
 
 						needUpdate := false
-						if _, ok := t.tunnelIPtoClient.Load(clientTunIp); !ok || session.tunnelIP == "" {
+						if _, ok := t.tunnelIPtoClient.Load(tunIPKey); !ok || session.tunnelIP == "" {
 							needUpdate = true
 							// A client may move between public addresses; keep only the
 							// latest tunnel-IP mapping for this session.
 							if session.tunnelIP != "" && session.tunnelIP != clientTunIp {
-								t.tunnelIPtoClient.Delete(session.tunnelIP)
+								t.tunnelIPtoClient.Delete(ip4KeyFromString(session.tunnelIP))
 							}
 							session.tunnelIP = clientTunIp
 						}
@@ -369,7 +407,7 @@ func (t tunnel) run(ctx context.Context) {
 						if needUpdate {
 							// Store the source address as-is; the outbound path
 							// type-asserts it back to *net.UDPAddr.
-							t.tunnelIPtoClient.Store(clientTunIp, raddr)
+							t.tunnelIPtoClient.Store(tunIPKey, raddr)
 							t.log.Printf("Updated tunnel IP for %s to %s", raddrStr, clientTunIp)
 						}
 						return nil
@@ -384,7 +422,10 @@ func (t tunnel) run(ctx context.Context) {
 			// registered itself with a heartbeat. This prevents arbitrary hosts
 			// from injecting packets into the tunnel network.
 			if t.server {
-				if _, ok := t.activeClients.Load(raddr.String()); !ok {
+				t.activeClientsMu.RLock()
+				_, ok := t.activeClients[raddr.AddrPort()]
+				t.activeClientsMu.RUnlock()
+				if !ok {
 					t.log.Printf("dropping inbound data from unregistered client: %s", raddr)
 					return nil
 				}
@@ -502,31 +543,57 @@ func (t *tunnel) cleanupStaleClients(ctx context.Context, staleTimeout time.Dura
 			return
 		case <-ticker.C:
 			now := time.Now()
-			t.activeClients.Range(func(key interface{}, value interface{}) bool {
-				session := value.(*clientSession)
+
+			// Collect stale clients under read lock.
+			type staleEntry struct {
+				key      netip.AddrPort
+				tunnelIP string
+			}
+			var stale []staleEntry
+			t.activeClientsMu.RLock()
+			for key, session := range t.activeClients {
 				session.mu.Lock()
 				if now.Sub(session.lastActive) > staleTimeout {
-					clientAddrStr := key.(string)
-					tunnelIP := session.tunnelIP
+					stale = append(stale, staleEntry{key: key, tunnelIP: session.tunnelIP})
+				}
+				session.mu.Unlock()
+			}
+			t.activeClientsMu.RUnlock()
+
+			if len(stale) == 0 {
+				continue
+			}
+
+			// Delete stale entries under write lock.
+			t.activeClientsMu.Lock()
+			for _, entry := range stale {
+				session, ok := t.activeClients[entry.key]
+				if !ok {
+					continue
+				}
+				session.mu.Lock()
+				if now.Sub(session.lastActive) > staleTimeout {
+					delete(t.activeClients, entry.key)
 					session.mu.Unlock()
-					t.log.Printf("Removing stale client session: %s (Tunnel IP: %s)", clientAddrStr, tunnelIP)
-					t.activeClients.Delete(key)
+					t.log.Printf("Removing stale client session: %s (Tunnel IP: %s)", entry.key, entry.tunnelIP)
 
 					// If a heartbeat already moved this tunnel IP to a new public
 					// address, keep the newer mapping.
-					if raddrInterface, ok := t.tunnelIPtoClient.Load(tunnelIP); ok {
+					tunIPKey := ip4KeyFromString(entry.tunnelIP)
+					if raddrInterface, ok := t.tunnelIPtoClient.Load(tunIPKey); ok {
 						raddr := raddrInterface.(*net.UDPAddr)
-						if clientAddrStr == raddr.String() {
-							t.tunnelIPtoClient.Delete(tunnelIP)
+						if entry.key == raddr.AddrPort() {
+							t.tunnelIPtoClient.Delete(tunIPKey)
 						} else {
-							t.log.Printf("Public IP for tunnel IP %s changed from %s to %s", tunnelIP, clientAddrStr, raddr.String())
+							t.log.Printf("Public IP for tunnel IP %s changed from %s to %s", entry.tunnelIP, entry.key, raddr)
 						}
 					}
 				} else {
+					// Session was refreshed between RLock and Lock; skip it.
 					session.mu.Unlock()
 				}
-				return true // Continue iteration
-			})
+			}
+			t.activeClientsMu.Unlock()
 		}
 	}
 }
@@ -540,22 +607,35 @@ func (t *tunnel) logConnectedClients(ctx context.Context, interval time.Duration
 			return
 		case <-ticker.C:
 			t.log.Printf("--- Connected clients ---")
-			t.activeClients.Range(func(key, value interface{}) bool {
-				session := value.(*clientSession)
+			t.activeClientsMu.RLock()
+			for key, session := range t.activeClients {
 				session.mu.Lock()
 				tunIP := session.tunnelIP
 				session.mu.Unlock()
 				if tunIP != "" {
-					t.log.Printf("  public=%s  tunnel=%s", key.(string), tunIP)
+					t.log.Printf("  public=%s  tunnel=%s", key, tunIP)
 				} else {
-					t.log.Printf("  public=%s  tunnel=(not yet assigned)", key.(string))
+					t.log.Printf("  public=%s  tunnel=(not yet assigned)", key)
 				}
-				return true
-			})
+			}
+			t.activeClientsMu.RUnlock()
 		}
 	}
 }
 
 func isDone(ctx context.Context) bool {
 	return ctx.Err() != nil
+}
+
+// ip4Key converts a net.IP to a [4]byte key for use as a sync.Map key,
+// avoiding the string allocation that net.IP.String() would produce.
+func ip4Key(ip net.IP) [4]byte {
+	var key [4]byte
+	copy(key[:], ip.To4())
+	return key
+}
+
+// ip4KeyFromString parses s as an IPv4 address and returns a [4]byte key.
+func ip4KeyFromString(s string) [4]byte {
+	return ip4Key(net.ParseIP(s))
 }

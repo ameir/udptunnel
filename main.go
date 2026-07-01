@@ -107,7 +107,7 @@ type TunnelConfig struct {
 	DisableGsoGro bool
 }
 
-func loadConfig(conf string) (tunn tunnel, logger *log.Logger, closer func() error) {
+func loadConfig(conf string) (tunn *tunnel, logger *log.Logger, closer func() error) {
 	var logBuf bytes.Buffer
 	logger = log.New(io.MultiWriter(os.Stderr, &logBuf), "", log.Ldate|log.Ltime|log.Lshortfile)
 
@@ -183,7 +183,7 @@ func loadConfig(conf string) (tunn tunnel, logger *log.Logger, closer func() err
 		logger.Fatalf("private tunnel address must be valid IPv4 address")
 	}
 
-	tunn = tunnel{
+	tunn = &tunnel{
 		server:        serverMode,
 		tunDevName:    config.TunnelDevice,
 		tunLocalAddr:  config.TunnelAddress,

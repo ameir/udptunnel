@@ -11,8 +11,8 @@ import (
 	"golang.org/x/net/ipv4"
 )
 
-const maxUDPSendBatch = 32
-const maxUDPRecvBatch = 32
+const maxUDPSendBatch = 128
+const maxUDPRecvBatch = 128
 
 // udpPacket keeps the destination alongside the payload so one batch can
 // contain packets for different clients in server mode.
@@ -45,6 +45,9 @@ type udpBatchSender struct {
 	// msgs is reused to avoid allocating the ipv4.Message slice for every TUN
 	// read. Only the per-message Buffers slices are rebuilt.
 	msgs []ipv4.Message
+	// bufs provides pre-allocated single-element Buffers for each message slot,
+	// eliminating the per-packet [][]byte{packet.data} heap allocation.
+	bufs [maxUDPSendBatch][1][]byte
 }
 
 func newUDPBatchSender(conn *net.UDPConn) *udpBatchSender {
@@ -67,8 +70,9 @@ func (s *udpBatchSender) WriteBatch(packets []udpPacket) (int, error) {
 		msgs := s.msgs[:end-total]
 		for i := range msgs {
 			packet := packets[total+i]
+			s.bufs[i][0] = packet.data
 			msgs[i] = ipv4.Message{
-				Buffers: [][]byte{packet.data},
+				Buffers: s.bufs[i][:],
 				Addr:    packet.addr,
 			}
 		}

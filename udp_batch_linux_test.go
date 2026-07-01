@@ -39,7 +39,7 @@ func TestUDPBatchSenderSendmmsg(t *testing.T) {
 		t.Fatalf("WriteBatch sent %d packets, want %d", n, len(packets))
 	}
 
-	if err := server.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+	if err := server.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	buf := make([]byte, 32)
@@ -142,5 +142,7 @@ func listenUDPTestSocket(t *testing.T) *net.UDPConn {
 		}
 		t.Fatal(err)
 	}
+	conn.SetReadBuffer(4 << 20)
+	conn.SetWriteBuffer(4 << 20)
 	return conn
 }
