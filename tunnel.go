@@ -365,13 +365,13 @@ func (t *tunnel) run(ctx context.Context) {
 					// Heartbeats are deliberately non-IP control messages carried on
 					// the same UDP socket as tunneled packets.
 					if strings.HasPrefix(string(payload), pingPrefix) {
-						clientTunIp := strings.TrimPrefix(string(payload), pingPrefix)
+						clientTunIP := strings.TrimPrefix(string(payload), pingPrefix)
 
-						parsedTunIP := net.ParseIP(clientTunIp)
+						parsedTunIP := net.ParseIP(clientTunIP)
 						// Reject malformed heartbeats so garbage can't pollute the
 						// tunnel-IP mapping or the logs.
 						if parsedTunIP == nil {
-							t.log.Printf("ignoring heartbeat with invalid tunnel IP %q from %s", clientTunIp, raddrStr)
+							t.log.Printf("ignoring heartbeat with invalid tunnel IP %q from %s", clientTunIP, raddrStr)
 							return nil
 						}
 						tunIPKey := ip4Key(parsedTunIP)
@@ -397,10 +397,10 @@ func (t *tunnel) run(ctx context.Context) {
 							needUpdate = true
 							// A client may move between public addresses; keep only the
 							// latest tunnel-IP mapping for this session.
-							if session.tunnelIP != "" && session.tunnelIP != clientTunIp {
+							if session.tunnelIP != "" && session.tunnelIP != clientTunIP {
 								t.tunnelIPtoClient.Delete(ip4KeyFromString(session.tunnelIP))
 							}
-							session.tunnelIP = clientTunIp
+							session.tunnelIP = clientTunIP
 						}
 						session.mu.Unlock()
 
@@ -408,7 +408,7 @@ func (t *tunnel) run(ctx context.Context) {
 							// Store the source address as-is; the outbound path
 							// type-asserts it back to *net.UDPAddr.
 							t.tunnelIPtoClient.Store(tunIPKey, raddr)
-							t.log.Printf("Updated tunnel IP for %s to %s", raddrStr, clientTunIp)
+							t.log.Printf("Updated tunnel IP for %s to %s", raddrStr, clientTunIP)
 						}
 						return nil
 					}
@@ -629,9 +629,15 @@ func isDone(ctx context.Context) bool {
 
 // ip4Key converts a net.IP to a [4]byte key for use as a sync.Map key,
 // avoiding the string allocation that net.IP.String() would produce.
+// If ip is not a valid IPv4 address, returns a zero key (which should
+// not match any real client).
 func ip4Key(ip net.IP) [4]byte {
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return [4]byte{}
+	}
 	var key [4]byte
-	copy(key[:], ip.To4())
+	copy(key[:], ip4)
 	return key
 }
 

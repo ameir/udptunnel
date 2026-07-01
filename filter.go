@@ -20,10 +20,10 @@ func (ip ipPacket) Version() int {
 }
 
 func (ip ipPacket) Protocol() int {
-	if len(ip) > 9 && ip.Version() == 4 {
-		return int(ip[9])
+	if len(ip) < 10 {
+		return 0
 	}
-	return 0
+	return int(ip[9])
 }
 
 type protocolFilter struct{}
