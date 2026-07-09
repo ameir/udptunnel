@@ -21,7 +21,17 @@ This only supports Linux.
 
 Build the daemon:
 
-```go get -u github.com/dsnet/udptunnel```
+```
+go install github.com/dsnet/udptunnel@latest
+```
+
+Or build release binaries for Linux amd64, armv7, and arm64 from a checkout:
+
+```
+./build.sh
+```
+
+The build script writes binaries to `dist/` and creates `dist/sha256sum.txt`.
 
 Create a server configuration file:
 
@@ -33,19 +43,24 @@ Create a server configuration file:
 ```
 
 The `NetworkAddress` with an empty host indicates that the daemon is operating
-in server mode.
+in server mode. The server binds the specified UDP port and learns clients from
+their heartbeats.
 
 Create a client configuration file:
 
 ```javascript
 {
 	"TunnelAddress": "10.0.0.2",
-	"NetworkAddress": "server.example.com:8000"
+	"NetworkAddress": "server.example.com:8000",
+	"HeartbeatInterval": 30
 }
 ```
 
 The host `server.example.com` is assumed to resolve to some address where the
-client can reach the server.
+client can reach the server. In client mode, the daemon resolves the server
+name periodically and sends heartbeat messages to keep NAT state open. If the
+client's public UDP address changes, the server updates its mapping from the
+client's private tunnel address to the latest public address.
 
 Start the daemon on both the client and server (assuming `$GOPATH/bin` is in your `$PATH`):
 
@@ -78,3 +93,23 @@ Password: ...
 The above example shows the client trying to communicate with the server,
 which is addressable at `10.0.0.1`. The example commands can be done from the
 server by dialing the client at `10.0.0.2`, instead.
+
+## Configuration ##
+
+The configuration file is JSON. Supported fields are:
+
+* `LogFile`: Optional path for daemon logs. Logs go to stderr when omitted.
+* `TunnelDevice`: Optional TUN device name. The kernel chooses a name when
+  omitted.
+* `TunnelAddress`: Required private IPv4 address for this endpoint. Each
+  endpoint must use a different address in the same `/24`, such as
+  `10.0.0.1` and `10.0.0.2`.
+* `NetworkAddress`: Required UDP address. Use `":PORT"` for server mode and
+  `"HOST:PORT"` for client mode.
+* `HeartbeatInterval`: Optional client heartbeat interval in seconds. The
+  default is `30`.
+* `DisableGsoGro`: Optional boolean. Leave it as `false` unless you need to
+  disable TUN GSO/GRO offload for kernel or environment compatibility.
+
+Only IPv4 tunnel traffic is forwarded. TCP, UDP, and ICMP packets are allowed;
+other protocols and IPv6 packets are dropped.
